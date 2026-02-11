@@ -33,9 +33,13 @@ fn drain_latest<T>(rx: &mpsc::Receiver<T>) -> Option<T> {
 
 fn main() {
     // Determine render layout from terminal pixel size
-    let render_cfg = match renderer::terminal_pixel_size() {
-        Some((w, h)) => renderer::RenderConfig::fit(w, h / 2),
-        None => renderer::RenderConfig::fit(271, 256),
+    let (render_cfg, top_pad) = match renderer::terminal_pixel_size() {
+        Some((w, h)) => {
+            let cfg = renderer::RenderConfig::fit(w, 256);
+            let pad = h.saturating_sub(cfg.frame_height) / 2;
+            (cfg, pad)
+        }
+        None => (renderer::RenderConfig::fit(542, 256), 0),
     };
 
     // Enter alternate screen and hide cursor
@@ -115,7 +119,7 @@ fn main() {
             let t0 = Instant::now();
             let rgba = renderer::render(&snap, &render_cfg);
             let t1 = Instant::now();
-            let data = encoder.encode(&rgba, render_cfg.frame_width, render_cfg.frame_height);
+            let data = encoder.encode(&rgba, render_cfg.frame_width, render_cfg.frame_height, top_pad);
             let t2 = Instant::now();
             render_fps.render_ms.store(t1.duration_since(t0).as_millis() as u32, Ordering::Relaxed);
             render_fps.encode_ms.store(t2.duration_since(t1).as_millis() as u32, Ordering::Relaxed);

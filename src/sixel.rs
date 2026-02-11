@@ -26,7 +26,6 @@ pub fn encode_sixel(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>,
 pub fn output_frame(sixel_data: &[u8]) -> io::Result<()> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    // Build entire frame in one buffer: BSU + cursor home + sixel + ESU
     let mut buf = Vec::with_capacity(10 + 3 + sixel_data.len() + 10);
     buf.extend_from_slice(b"\x1b[?2026h"); // begin synchronized update
     buf.extend_from_slice(b"\x1b[H"); // cursor home
@@ -107,7 +106,9 @@ impl SixelEncoder {
         self.lut[((r as usize) >> 3 << 10) | ((g as usize) >> 3 << 5) | ((b as usize) >> 3)]
     }
 
-    pub fn encode(&self, rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
+    /// Encode RGBA buffer to Sixel with optional top padding for vertical centering.
+    /// `top_pad` is the number of blank pixel rows to prepend.
+    pub fn encode(&self, rgba: &[u8], width: usize, height: usize, top_pad: usize) -> Vec<u8> {
         let num_pixels = width * height;
 
         // Map every pixel to a palette index via LUT
@@ -119,11 +120,18 @@ impl SixelEncoder {
 
         let mut out = Vec::with_capacity(num_pixels);
 
-        // DCS header + raster attributes
-        let _ = write!(out, "\x1bP0;0;0q\"1;1;{};{}", width, height);
+        // DCS header + raster attributes (total height includes padding)
+        let total_height = height + top_pad;
+        let _ = write!(out, "\x1bP0;0;0q\"1;1;{};{}", width, total_height);
 
         // Pre-rendered palette definitions
         out.extend_from_slice(&self.palette_def);
+
+        // Empty bands for top padding
+        let pad_bands = (top_pad + 5) / 6;
+        for _ in 0..pad_bands {
+            out.push(b'-');
+        }
 
         // Encode sixel bands (6 rows each)
         let num_bands = (height + 5) / 6;
@@ -267,7 +275,7 @@ mod tests {
         let width = 8;
         let height = 6;
         let rgba = vec![128u8; width * height * 4];
-        let data = encoder.encode(&rgba, width, height);
+        let data = encoder.encode(&rgba, width, height, 0);
         assert!(data.starts_with(b"\x1bP"), "Should start with DCS header");
     }
 
@@ -277,7 +285,7 @@ mod tests {
         let width = 8;
         let height = 6;
         let rgba = vec![128u8; width * height * 4];
-        let data = encoder.encode(&rgba, width, height);
+        let data = encoder.encode(&rgba, width, height, 0);
         assert!(data.ends_with(b"\x1b\\"), "Should end with ST footer");
     }
 
@@ -287,7 +295,7 @@ mod tests {
         let width = 16;
         let height = 12;
         let rgba = vec![100u8; width * height * 4];
-        let data = encoder.encode(&rgba, width, height);
+        let data = encoder.encode(&rgba, width, height, 0);
         assert!(data.len() > 100, "Encoded data should have substantial content");
     }
 

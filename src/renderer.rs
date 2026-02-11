@@ -1,16 +1,16 @@
 use crate::state::{idx, FrameSnapshot, N};
 
-/// Tokyo Night inspired color stops for temperature mapping.
-/// Cold(0.0) -> deep navy -> blue -> cyan -> orange -> soft pink(1.0)
+/// Blackbody-inspired color stops for temperature mapping.
+/// Mostly black, only hot areas glow: black -> ember -> crimson -> orange -> amber
 const COLOR_STOPS: [(f64, f64, f64); 5] = [
-    (26.0, 27.0, 38.0),    // #1a1b26 dark navy  (0.00)
-    (122.0, 162.0, 247.0),  // #7aa2f7 blue       (0.25)
-    (125.0, 207.0, 255.0),  // #7dcfff light cyan  (0.50)
-    (255.0, 158.0, 100.0),  // #ff9e64 orange      (0.75)
-    (247.0, 118.0, 142.0),  // #f7768e soft pink   (1.00)
+    (6.0, 6.0, 6.0),       // #060606 black        (0.00)
+    (14.0, 6.0, 6.0),      // #0e0606 barely warm  (0.25)
+    (72.0, 12.0, 12.0),    // #480c0c ember         (0.50)
+    (204.0, 44.0, 20.0),   // #cc2c14 crimson       (0.75)
+    (255.0, 190.0, 30.0),  // #ffbe1e amber         (1.00)
 ];
 
-/// Convert temperature [0.0, 1.0] to RGBA color (Tokyo Night palette).
+/// Convert temperature [0.0, 1.0] to RGBA color (blackbody palette).
 pub fn temperature_to_rgba(t: f64) -> [u8; 4] {
     let t = t.clamp(0.0, 1.0);
     let seg = t * 4.0;
@@ -252,8 +252,8 @@ pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig) -> Vec<u8> {
     }
 
     // Draw particles as 3x3 diamond with adaptive contrast.
-    const CORE_BRIGHT: [f64; 3] = [230.0, 230.0, 240.0];
-    const CORE_DARK: [f64; 3] = [26.0, 28.0, 46.0];
+    const CORE_BRIGHT: [f64; 3] = [240.0, 240.0, 220.0];
+    const CORE_DARK: [f64; 3] = [8.0, 8.0, 8.0];
     const DIAMOND: [(isize, isize, bool); 5] = [
         (0, -1, false),
         (-1, 0, false),
@@ -325,28 +325,28 @@ mod tests {
     }
 
     #[test]
-    fn test_color_cold_is_dark_navy() {
+    fn test_color_cold_is_near_black() {
         let rgba = temperature_to_rgba(0.0);
-        assert_eq!(rgba[0], 26, "R should be 26");
-        assert_eq!(rgba[1], 27, "G should be 27");
-        assert_eq!(rgba[2], 38, "B should be 38");
+        assert_eq!(rgba[0], 6, "R should be 6");
+        assert_eq!(rgba[1], 6, "G should be 6");
+        assert_eq!(rgba[2], 6, "B should be 6");
         assert_eq!(rgba[3], 255, "A should be 255");
     }
 
     #[test]
-    fn test_color_hot_is_soft_pink() {
+    fn test_color_hot_is_amber() {
         let rgba = temperature_to_rgba(1.0);
-        assert_eq!(rgba[0], 247, "R should be 247");
-        assert_eq!(rgba[1], 118, "G should be 118");
-        assert_eq!(rgba[2], 142, "B should be 142");
+        assert_eq!(rgba[0], 255, "R should be 255");
+        assert_eq!(rgba[1], 190, "G should be 190");
+        assert_eq!(rgba[2], 30, "B should be 30");
     }
 
     #[test]
-    fn test_color_mid_is_cyan() {
+    fn test_color_mid_is_ember() {
         let rgba = temperature_to_rgba(0.5);
-        assert_eq!(rgba[0], 125, "R should be 125");
-        assert_eq!(rgba[1], 207, "G should be 207");
-        assert_eq!(rgba[2], 255, "B should be 255");
+        assert_eq!(rgba[0], 72, "R should be 72");
+        assert_eq!(rgba[1], 12, "G should be 12");
+        assert_eq!(rgba[2], 12, "B should be 12");
     }
 
     #[test]
