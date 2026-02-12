@@ -1,5 +1,8 @@
 use crate::state::{idx, N};
 
+/// Base temperature at the bottom wall (away from hot spot).
+const BOTTOM_BASE: f64 = 0.15;
+
 /// Boundary condition handler for top/bottom walls only.
 /// X-axis is periodic (wraps via idx).
 ///   - field_type 0 (scalar): Neumann (copy neighbor) at walls
@@ -15,8 +18,13 @@ pub fn set_bnd(field_type: i32, x: &mut [f64]) {
                 x[idx(i as i32, (N - 1) as i32)] = -x[idx(i as i32, (N - 2) as i32)];
             }
             3 => {
-                x[idx(i as i32, 0)] = 1.0;
-                x[idx(i as i32, 1)] = 1.0;
+                // Bottom: Gaussian hot spot centered at N/2
+                let dx = i as f64 - (N / 2) as f64;
+                let sigma = (N / 24) as f64;
+                let hot = BOTTOM_BASE + (1.0 - BOTTOM_BASE) * (-dx * dx / (2.0 * sigma * sigma)).exp();
+                x[idx(i as i32, 0)] = hot;
+                x[idx(i as i32, 1)] = hot;
+                // Top: cold
                 x[idx(i as i32, (N - 1) as i32)] = 0.0;
                 x[idx(i as i32, (N - 2) as i32)] = 0.0;
             }
@@ -140,13 +148,13 @@ pub struct SolverParams {
 impl Default for SolverParams {
     fn default() -> Self {
         Self {
-            visc: 0.0007,
-            diff: 0.0001,
-            dt: 0.002,
+            visc: 0.008,
+            diff: 0.002,
+            dt: 0.003,
             diffuse_iter: 20,
-            project_iter: 20,
-            heat_buoyancy: 14.0,
-            noise_amp: 0.005,
+            project_iter: 30,
+            heat_buoyancy: 8.0,
+            noise_amp: 0.0,
         }
     }
 }
@@ -182,10 +190,40 @@ fn inject_thermal_perturbation(
     }
 }
 
+/// Volumetric heat source at bottom hot spot and Newtonian cooling at top.
+/// This supplements the Dirichlet BCs which alone cannot drive heat into
+/// the interior fast enough (wall velocity ≈ 0, diff is small).
+fn inject_heat_source(temperature: &mut [f64], dt: f64) {
+    let center = (N / 2) as f64;
+    let sigma = (N / 24) as f64; // narrow: ~5 cells
+    let source_strength = 10.0;
+    let cool_rate = 8.0;
+
+    // Concentrated heat injection at bottom (rows 2–4)
+    for j in 2..5 {
+        let y_factor = 1.0 - (j - 2) as f64 / 3.0;
+        for i in 0..N {
+            let dx = i as f64 - center;
+            let g = (-dx * dx / (2.0 * sigma * sigma)).exp();
+            let ii = idx(i as i32, j as i32);
+            temperature[ii] += dt * source_strength * g * y_factor;
+        }
+    }
+
+    // Newtonian cooling near top (rows N-7 to N-3): decay toward 0
+    for j in (N - 7)..(N - 2) {
+        let y_factor = 1.0 - ((N - 3) - j) as f64 / 5.0;
+        for i in 0..N {
+            let ii = idx(i as i32, j as i32);
+            temperature[ii] *= 1.0 - dt * cool_rate * y_factor;
+        }
+    }
+}
+
 /// Apply buoyancy force: hot fluid rises, cold fluid sinks.
 /// vy += dt * buoyancy * (T - T_ambient), where T_ambient = 0.5
 fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64) {
-    let t_ambient = 0.5;
+    let t_ambient = BOTTOM_BASE;
     for j in 1..(N - 1) {
         for i in 0..N {
             let ii = idx(i as i32, j as i32);
@@ -293,7 +331,17 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     if params.noise_amp > 0.0 {
         inject_thermal_perturbation(&mut state.temperature, &mut state.rng, params.noise_amp);
     }
-    // No velocity decay — viscous diffusion handles dissipation
+
+    // Volumetric heat source at bottom hot spot + cooling at top.
+    // Dirichlet BCs alone can't push heat into the interior (diff too small,
+    // velocity zero at walls), so we inject heat directly into the first
+    // few interior rows and apply Newtonian cooling near the top.
+    inject_heat_source(&mut state.temperature, dt);
+
+    // Clamp temperature to physical bounds [0, 1]
+    for t in state.temperature.iter_mut() {
+        *t = t.clamp(0.0, 1.0);
+    }
 
     // Advect particles through the divergence-free velocity field
     advect_particles(state, dt);
@@ -535,13 +583,12 @@ mod tests {
 
         apply_buoyancy(&mut vy, &temperature, 1.0, 1.0);
 
-        // Hot spot should have positive vy (upward = increasing y)
+        // Hot spot should have stronger upward vy than ambient
         let hot_vy = vy[idx(mid as i32, mid as i32)];
         assert!(hot_vy > 0.0, "Hot spot should have positive vy (upward): got {}", hot_vy);
 
-        // Ambient regions should have zero velocity
         let ambient_vy = vy[idx(10, (mid / 2) as i32)];
-        assert!(ambient_vy.abs() < 1e-10, "Ambient should have zero vy");
+        assert!(hot_vy > ambient_vy, "Hot spot vy should exceed ambient vy");
     }
 
     #[test]
@@ -549,10 +596,15 @@ mod tests {
         let mut temperature = vec![0.5; SIZE];
         set_bnd(3, &mut temperature);
 
-        // 2-row Dirichlet: y=0,1 hot; y=N-1,N-2 cold
+        // Bottom: Gaussian hot spot at center (peak=1.0), base=BOTTOM_BASE at edges
+        let center_t = temperature[idx((N / 2) as i32, 0)];
+        assert!((center_t - 1.0).abs() < 1e-6, "Bottom center should be ~1.0, got {}", center_t);
+        let edge_t = temperature[idx(0, 0)];
+        assert!(edge_t >= BOTTOM_BASE - 0.01, "Bottom edge should be >= BOTTOM_BASE, got {}", edge_t);
+        assert!(edge_t < center_t, "Bottom edge should be cooler than center, got {}", edge_t);
+
+        // Top: cold
         for i in 0..N {
-            assert!((temperature[idx(i as i32, 0)] - 1.0).abs() < 1e-10, "y=0 should be 1.0");
-            assert!((temperature[idx(i as i32, 1)] - 1.0).abs() < 1e-10, "y=1 should be 1.0");
             assert!(temperature[idx(i as i32, (N - 1) as i32)].abs() < 1e-10, "y=N-1 should be 0.0");
             assert!(temperature[idx(i as i32, (N - 2) as i32)].abs() < 1e-10, "y=N-2 should be 0.0");
         }
@@ -642,10 +694,10 @@ mod tests {
             fluid_step(&mut state, &params);
         }
 
-        // Bottom boundary should still be hot
+        // Bottom boundary: Gaussian hot spot + cool base, avg should be above base
         let bottom_avg: f64 =
             (0..N).map(|x| state.temperature[idx(x as i32, 0)]).sum::<f64>() / N as f64;
-        assert!(bottom_avg > 0.5, "Bottom should remain hot: {}", bottom_avg);
+        assert!(bottom_avg > BOTTOM_BASE, "Bottom avg should exceed base: {}", bottom_avg);
 
         // Top boundary should still be cold
         let top_avg: f64 =
@@ -663,5 +715,188 @@ mod tests {
             "Mid-plane should have horizontal variation (convection): variance={}",
             variance
         );
+    }
+
+    #[test]
+    #[ignore] // diagnostic only — run with: cargo test test_diagnose -- --ignored --nocapture
+    fn test_diagnose_vertical_convection() {
+        let mut state = SimState::new();
+        let params = SolverParams::default();
+
+        // Run 200 fluid steps
+        for _ in 0..200 {
+            fluid_step(&mut state, &params);
+        }
+
+        // --- Velocity magnitude diagnostics ---
+        let mut max_vx: f64 = 0.0;
+        let mut max_vy: f64 = 0.0;
+        for j in 2..(N - 2) {
+            for i in 0..N {
+                let ii = idx(i as i32, j as i32);
+                max_vx = max_vx.max(state.vx[ii].abs());
+                max_vy = max_vy.max(state.vy[ii].abs());
+            }
+        }
+        let ratio = if max_vx > 1e-30 { max_vy / max_vx } else { f64::NAN };
+        eprintln!("=== Vertical Convection Diagnostics (after 200 steps) ===");
+        eprintln!("max |vx| = {:.6e}", max_vx);
+        eprintln!("max |vy| = {:.6e}", max_vy);
+        eprintln!("ratio max_vy / max_vx = {:.4}", ratio);
+
+        // --- Temperature profile diagnostics ---
+        let y_quarter = N / 4;
+        let y_mid = N / 2;
+        let y_three_quarter = 3 * N / 4;
+
+        let avg_temp_quarter: f64 = (0..N)
+            .map(|x| state.temperature[idx(x as i32, y_quarter as i32)])
+            .sum::<f64>()
+            / N as f64;
+        let avg_temp_mid: f64 = (0..N)
+            .map(|x| state.temperature[idx(x as i32, y_mid as i32)])
+            .sum::<f64>()
+            / N as f64;
+        let avg_temp_three_quarter: f64 = (0..N)
+            .map(|x| state.temperature[idx(x as i32, y_three_quarter as i32)])
+            .sum::<f64>()
+            / N as f64;
+        eprintln!(
+            "avg T at y=N/4 (near bottom) = {:.6}",
+            avg_temp_quarter
+        );
+        eprintln!("avg T at y=N/2 (middle)      = {:.6}", avg_temp_mid);
+        eprintln!(
+            "avg T at y=3N/4 (near top)   = {:.6}",
+            avg_temp_three_quarter
+        );
+
+        // --- Horizontal temperature variance at midplane ---
+        let mid_temps: Vec<f64> = (0..N)
+            .map(|x| state.temperature[idx(x as i32, y_mid as i32)])
+            .collect();
+        let mid_avg = mid_temps.iter().sum::<f64>() / N as f64;
+        let mid_variance =
+            mid_temps.iter().map(|t| (t - mid_avg).powi(2)).sum::<f64>() / N as f64;
+        eprintln!(
+            "horizontal T variance at y=N/2 = {:.6e}",
+            mid_variance
+        );
+
+        // --- Vertical velocity profile at x=N/2 ---
+        let x_mid = (N / 2) as i32;
+        eprintln!("vy profile at x=N/2 (sampled every 8 rows):");
+        let mut j = 0;
+        while j < N {
+            let vy_val = state.vy[idx(x_mid, j as i32)];
+            let t_val = state.temperature[idx(x_mid, j as i32)];
+            eprintln!(
+                "  y={:>4}  vy={:>+12.6e}  T={:.4}",
+                j, vy_val, t_val
+            );
+            j += 8;
+        }
+
+        // --- Buoyancy vs projection survival analysis ---
+        eprintln!("=== Buoyancy vs Projection Survival (step 201) ===");
+
+        // Snapshot vy before buoyancy
+        let vy_before = state.vy.clone();
+
+        // Apply buoyancy manually
+        apply_buoyancy(
+            &mut state.vy,
+            &state.temperature,
+            params.heat_buoyancy,
+            params.dt,
+        );
+
+        // Measure buoyancy contribution
+        let mut max_buoyancy_delta: f64 = 0.0;
+        for j in 2..(N - 2) {
+            for i in 0..N {
+                let ii = idx(i as i32, j as i32);
+                let delta = (state.vy[ii] - vy_before[ii]).abs();
+                max_buoyancy_delta = max_buoyancy_delta.max(delta);
+            }
+        }
+        eprintln!(
+            "max |vy_after_buoyancy - vy_before| = {:.6e}",
+            max_buoyancy_delta
+        );
+
+        // Now apply projection
+        project(
+            &mut state.vx,
+            &mut state.vy,
+            &mut state.work,
+            &mut state.work2,
+            params.project_iter,
+        );
+
+        // Measure how much survived after projection
+        let mut max_survived_delta: f64 = 0.0;
+        for j in 2..(N - 2) {
+            for i in 0..N {
+                let ii = idx(i as i32, j as i32);
+                let delta = (state.vy[ii] - vy_before[ii]).abs();
+                max_survived_delta = max_survived_delta.max(delta);
+            }
+        }
+        eprintln!(
+            "max |vy_after_project - vy_before|  = {:.6e}",
+            max_survived_delta
+        );
+
+        let survival_ratio = if max_buoyancy_delta > 1e-30 {
+            max_survived_delta / max_buoyancy_delta
+        } else {
+            f64::NAN
+        };
+        eprintln!(
+            "survival ratio (survived/applied)   = {:.6}",
+            survival_ratio
+        );
+
+        // --- Horizontal structure: vy at y=N/2 across all x ---
+        eprintln!("=== Horizontal vy structure at y=N/2 (sampled every 8 cols) ===");
+        let mut vy_at_mid = Vec::new();
+        for x in 0..N {
+            vy_at_mid.push(state.vy[idx(x as i32, y_mid as i32)]);
+        }
+        let mut x = 0;
+        while x < N {
+            eprint!("  x={:>4} vy={:>+8.4} |", x, vy_at_mid[x]);
+            x += 8;
+        }
+        eprintln!();
+
+        // Count sign changes in vy at midplane (= number of convection cell boundaries)
+        let mut sign_changes = 0;
+        for x in 1..N {
+            if vy_at_mid[x] * vy_at_mid[x - 1] < 0.0 {
+                sign_changes += 1;
+            }
+        }
+        eprintln!("vy sign changes at y=N/2: {} (≈ {} convection cells)", sign_changes, sign_changes / 2);
+
+        // --- Average |vx| vs average |vy| in interior ---
+        let mut sum_vx: f64 = 0.0;
+        let mut sum_vy: f64 = 0.0;
+        let mut count = 0usize;
+        for j in 2..(N - 2) {
+            for i in 0..N {
+                let ii = idx(i as i32, j as i32);
+                sum_vx += state.vx[ii].abs();
+                sum_vy += state.vy[ii].abs();
+                count += 1;
+            }
+        }
+        eprintln!("avg |vx| = {:.6e}", sum_vx / count as f64);
+        eprintln!("avg |vy| = {:.6e}", sum_vy / count as f64);
+        eprintln!("ratio avg_vy / avg_vx = {:.4}", (sum_vy / count as f64) / (sum_vx / count as f64));
+
+        // Diagnostic test: always passes
+        assert!(true);
     }
 }

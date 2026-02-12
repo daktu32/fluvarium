@@ -76,22 +76,24 @@ impl SimState {
         let mut vx = vec![0.0; SIZE];
         let mut vy = vec![0.0; SIZE];
 
-        // Initial temperature: linear gradient bottom(1.0) -> top(0.0)
-        // with large-scale sinusoidal perturbation to seed convection cells
+        // Initial temperature: Gaussian hot spot at bottom center, cold top.
+        // Bottom BC has a localized heat source (see solver::set_bnd field_type 3).
+        let bottom_base = 0.15;
+        let sigma = (N / 24) as f64;
+        let center = (N / 2) as f64;
         for y in 0..N {
-            let t_base = 1.0 - (y as f64 / (N - 1) as f64);
-            let y_env = (std::f64::consts::PI * y as f64 / (N - 1) as f64).sin();
+            let y_frac = y as f64 / (N - 1) as f64;
             for x in 0..N {
-                let x_wave = (2.0 * std::f64::consts::PI * x as f64 / N as f64).sin()
-                    + 0.5 * (4.0 * std::f64::consts::PI * x as f64 / N as f64).sin();
+                let dx = x as f64 - center;
+                let hot = bottom_base + (1.0 - bottom_base) * (-dx * dx / (2.0 * sigma * sigma)).exp();
+                let t_base = hot * (1.0 - y_frac); // gradient from hot-spot profile to 0
                 let noise = rng.next_f64() * 0.02;
-                let perturbation = 0.1 * y_env * x_wave;
-                temperature[idx(x as i32, y as i32)] = (t_base + perturbation + noise).clamp(0.0, 1.0);
+                temperature[idx(x as i32, y as i32)] = (t_base + noise).clamp(0.0, 1.0);
             }
         }
 
         // Small perturbation to velocity to break symmetry
-        let perturbation = 1e-3;
+        let perturbation = 1e-5;
         for y in 0..N {
             for x in 0..N {
                 let i = idx(x as i32, y as i32);
@@ -161,11 +163,12 @@ mod tests {
     #[test]
     fn test_initial_temperature_bottom_hot() {
         let state = SimState::new();
-        // y=0 is bottom (hot), with perturbation it should be close to 1.0
-        for x in 0..N {
-            let t = state.temperature[idx(x as i32, 0)];
-            assert!(t > 0.9, "Bottom should be hot (near 1.0), got {}", t);
-        }
+        // Bottom center (hot spot) should be near 1.0
+        let center_t = state.temperature[idx((N / 2) as i32, 0)];
+        assert!(center_t > 0.9, "Bottom center should be hot (near 1.0), got {}", center_t);
+        // Bottom edges should be at base temperature
+        let edge_t = state.temperature[idx(0, 0)];
+        assert!(edge_t < center_t, "Bottom edge should be cooler than center, got {}", edge_t);
     }
 
     #[test]

@@ -1,5 +1,7 @@
-use std::io::{self, Write};
+#[cfg(test)]
+use std::io::Write;
 
+#[cfg(test)]
 use crate::renderer::temperature_to_rgba;
 
 /// Encode RGBA buffer to Sixel format using icy_sixel.
@@ -21,22 +23,8 @@ pub fn encode_sixel(rgba: &[u8], width: usize, height: usize) -> Result<Vec<u8>,
     Ok(sixel_output.into_bytes())
 }
 
-/// Output a Sixel-encoded frame to stdout.
-/// Uses synchronized output (DEC 2026) and single write to minimize flicker.
-pub fn output_frame(sixel_data: &[u8]) -> io::Result<()> {
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let mut buf = Vec::with_capacity(10 + 3 + sixel_data.len() + 10);
-    buf.extend_from_slice(b"\x1b[?2026h"); // begin synchronized update
-    buf.extend_from_slice(b"\x1b[H"); // cursor home
-    buf.extend_from_slice(sixel_data);
-    buf.extend_from_slice(b"\x1b[?2026l"); // end synchronized update
-    handle.write_all(&buf)?;
-    handle.flush()?;
-    Ok(())
-}
-
 /// Number of palette colors: gradient colors + 1 white for tick marks.
+#[cfg(test)]
 const PALETTE_SIZE: usize = 64;
 
 /// Fast Sixel encoder with a fixed palette.
@@ -44,11 +32,13 @@ const PALETTE_SIZE: usize = 64;
 /// Palette: (PALETTE_SIZE-1) temperature gradient colors + 1 white (for tick marks).
 /// Uses a 32×32×32 RGB→palette LUT for O(1) per-pixel color mapping,
 /// bypassing the expensive color quantization that icy_sixel performs.
+#[cfg(test)]
 pub struct SixelEncoder {
     palette_def: Vec<u8>,
     lut: Vec<u8>,
 }
 
+#[cfg(test)]
 impl SixelEncoder {
     pub fn new() -> Self {
         let grad_colors = PALETTE_SIZE - 1; // gradient entries
@@ -198,6 +188,7 @@ impl SixelEncoder {
     }
 }
 
+#[cfg(test)]
 #[inline]
 fn flush_run(out: &mut Vec<u8>, ch: u8, len: u32) {
     if len == 0 {

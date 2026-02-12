@@ -5,6 +5,5 @@ edition = "2024"
 
 [dependencies]
 icy_sixel = "0.1"
-image = "0.25"
 ctrlc = "3.4"
-libc = "0.2.181"
+minifb = "0.28.0"
