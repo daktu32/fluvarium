@@ -1,8 +1,8 @@
 # fluvarium Progress
 
-## Current Status: YAML Config + Resizable Window + Status Bar
+## Current Status: Interactive Overlay Parameter Panel
 
-55 tests passing. 2-thread pipeline (physics + render/display). N=128 grid at 60fps with minifb. Full YAML configuration support with runtime parameter display.
+66 tests passing. 2-thread pipeline (physics + render/display). N=128 grid at 60fps with minifb. btop-style overlay panel for real-time parameter tuning.
 
 ## Completed
 
@@ -94,11 +94,21 @@
 - Sixel encoder gated behind `#[cfg(test)]`
 - Added `serde` + `serde_yaml` for YAML config
 
+### Sub-issue 10: Interactive Overlay Parameter Panel
+- **overlay.rs**: btop-style semi-transparent panel with darken background
+  - `OverlayState` (visible, selected), `ParamDef` with get/set function pointers
+  - 7 adjustable parameters: visc, diff, dt, buoyancy, source_strength, cool_rate, bottom_base
+  - Teal gradient gauge bars, short labels per row, full description on detail line
+- **Keyboard controls**: Space=toggle, Up/Down=navigate, Left/Right=adjust, Comma/Period=fine, R=reset, Escape=close/quit
+- **Font system**: nearest-neighbor resize (5×7 → 7×9) for readable overlay text, 1x hints for visual hierarchy
+- **Real-time tuning**: `mpsc::channel` sends updated `SolverParams` to physics thread
+- **Dynamic status bar**: shows current params when panel hidden, key hints when visible
+- 11 new tests (9 overlay + 2 renderer)
+
 ## Test Summary
-- **55 tests, all passing** (1 ignored: diagnostic)
+- **66 tests, all passing** (1 ignored: diagnostic)
 - `cargo test` and `cargo build --release` both succeed with 0 warnings
 
 ## Next Steps
 - Fine-tune convection dynamics (plume count, speed, visual appeal)
 - Issue #10: Simulation presets
-- Interactive parameter adjustment (keyboard controls)
