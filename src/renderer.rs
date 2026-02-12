@@ -35,17 +35,19 @@ const TICK_LEN: usize = 4;
 const BAR_TOTAL: usize = BAR_GAP + BAR_WIDTH + TICK_LEN;
 
 /// Status bar layout constants.
-const FONT_WIDTH: usize = 5;
-const FONT_HEIGHT: usize = 7;
+pub(crate) const FONT_WIDTH: usize = 5;
+pub(crate) const FONT_HEIGHT: usize = 7;
 const STATUS_PAD_TOP: usize = 3;
 const STATUS_PAD_BOTTOM: usize = 2;
-const STATUS_BAR_HEIGHT: usize = STATUS_PAD_TOP + FONT_HEIGHT + STATUS_PAD_BOTTOM;
+pub(crate) const STATUS_BAR_HEIGHT: usize = STATUS_PAD_TOP + FONT_HEIGHT + STATUS_PAD_BOTTOM;
 
 /// 5x7 bitmap font glyph lookup. Each row is a u8 with lower 5 bits = pixels (bit4=left).
 const fn glyph(ch: u8) -> [u8; FONT_HEIGHT] {
     match ch {
         b' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
         b'.' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00],
+        b'-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        b'>' => [0x10, 0x08, 0x04, 0x02, 0x04, 0x08, 0x10],
         b'=' => [0x00, 0x00, 0x1F, 0x00, 0x1F, 0x00, 0x00],
         b'|' => [0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04],
         b'0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
@@ -106,6 +108,50 @@ fn draw_char(buf: &mut [u8], frame_width: usize, x: usize, y: usize, ch: u8, col
             }
         }
     }
+}
+
+/// Draw a string of text at (x, y) in the given color. Returns the x position after the last character.
+pub(crate) fn draw_text(buf: &mut [u8], frame_width: usize, x: usize, y: usize, text: &str, color: [u8; 3]) -> usize {
+    let char_step = FONT_WIDTH + 1;
+    let mut cx = x;
+    for &ch in text.as_bytes() {
+        draw_char(buf, frame_width, cx, y, ch, color);
+        cx += char_step;
+    }
+    cx
+}
+
+/// Draw a character at (x, y) resized to target (cw × ch) pixels via nearest-neighbor.
+fn draw_char_sized(buf: &mut [u8], frame_width: usize, x: usize, y: usize, ch_code: u8, color: [u8; 3], cw: usize, ch: usize) {
+    let g = glyph(ch_code);
+    for py in 0..ch {
+        let src_row = py * FONT_HEIGHT / ch;
+        let bits = g[src_row];
+        for px in 0..cw {
+            let src_col = px * FONT_WIDTH / cw;
+            if bits & (1 << (FONT_WIDTH - 1 - src_col)) != 0 {
+                let offset = ((y + py) * frame_width + x + px) * 4;
+                if offset + 3 < buf.len() {
+                    buf[offset] = color[0];
+                    buf[offset + 1] = color[1];
+                    buf[offset + 2] = color[2];
+                    buf[offset + 3] = 255;
+                }
+            }
+        }
+    }
+}
+
+/// Draw a string of text at (x, y) with each character sized to (cw × ch) pixels.
+/// Returns the x position after the last character.
+pub(crate) fn draw_text_sized(buf: &mut [u8], frame_width: usize, x: usize, y: usize, text: &str, color: [u8; 3], cw: usize, ch: usize) -> usize {
+    let char_step = cw + cw / 5 + 1; // proportional spacing (~20% of char width)
+    let mut cx = x;
+    for &byte in text.as_bytes() {
+        draw_char_sized(buf, frame_width, cx, y, byte, color, cw, ch);
+        cx += char_step;
+    }
+    cx
 }
 
 /// Draw status text at the bottom of the frame buffer.
@@ -460,6 +506,42 @@ mod tests {
         let status_area = &buf[status_start..];
         let has_content = status_area.iter().any(|&b| b != 0);
         assert!(has_content, "Status bar should have rendered content");
+    }
+
+    #[test]
+    fn test_glyph_dash_arrow() {
+        // '-' and '>' should have non-zero bitmaps
+        let dash = super::glyph(b'-');
+        let has_dash = dash.iter().any(|&row| row != 0);
+        assert!(has_dash, "'-' glyph should have non-zero bits");
+
+        let arrow = super::glyph(b'>');
+        let has_arrow = arrow.iter().any(|&row| row != 0);
+        assert!(has_arrow, "'>' glyph should have non-zero bits");
+    }
+
+    #[test]
+    fn test_draw_text_returns_end_position() {
+        let cfg = test_config();
+        let mut buf = vec![0u8; cfg.frame_width * cfg.frame_height * 4];
+        let color = [0xFF, 0xFF, 0xFF];
+        let end_x = super::draw_text(&mut buf, cfg.frame_width, 10, 10, "hello", color);
+        // "hello" = 5 chars, each FONT_WIDTH + 1 pixel spacing = 6 * 5 = 30
+        let expected = 10 + 5 * (super::FONT_WIDTH + 1);
+        assert_eq!(end_x, expected, "draw_text should return cursor position after text");
+
+        // Verify some pixels were drawn (non-zero in the text area)
+        let mut found = false;
+        for y in 10..10 + super::FONT_HEIGHT {
+            for x in 10..end_x {
+                let off = (y * cfg.frame_width + x) * 4;
+                if buf[off] != 0 {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        assert!(found, "draw_text should have drawn some pixels");
     }
 
     #[test]

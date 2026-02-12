@@ -132,6 +132,7 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
 }
 
 /// Solver parameters for the fluid simulation.
+#[derive(Clone)]
 pub struct SolverParams {
     pub visc: f64,
     pub diff: f64,
