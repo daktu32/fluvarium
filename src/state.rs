@@ -1,7 +1,5 @@
 pub const N: usize = 128;
 pub const SIZE: usize = N * N;
-pub const NUM_PARTICLES: usize = 400;
-
 pub struct Xor128 {
     x: u32,
     y: u32,
@@ -69,7 +67,7 @@ impl SimState {
         }
     }
 
-    pub fn new() -> Self {
+    pub fn new(num_particles: usize, bottom_base: f64) -> Self {
         let mut rng = Xor128::new(42);
 
         let mut temperature = vec![0.0; SIZE];
@@ -78,7 +76,6 @@ impl SimState {
 
         // Initial temperature: Gaussian hot spot at bottom center, cold top.
         // Bottom BC has a localized heat source (see solver::set_bnd field_type 3).
-        let bottom_base = 0.15;
         let sigma = (N / 24) as f64;
         let center = (N / 2) as f64;
         for y in 0..N {
@@ -104,9 +101,9 @@ impl SimState {
 
         // Initialize particles at random positions in the active interior
         // (outside the 2-row Dirichlet boundary zone where velocity ≈ 0)
-        let mut particles_x = Vec::with_capacity(NUM_PARTICLES);
-        let mut particles_y = Vec::with_capacity(NUM_PARTICLES);
-        for _ in 0..NUM_PARTICLES {
+        let mut particles_x = Vec::with_capacity(num_particles);
+        let mut particles_y = Vec::with_capacity(num_particles);
+        for _ in 0..num_particles {
             let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
             let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
             particles_x.push(px);
@@ -162,7 +159,7 @@ mod tests {
 
     #[test]
     fn test_initial_temperature_bottom_hot() {
-        let state = SimState::new();
+        let state = SimState::new(400, 0.15);
         // Bottom center (hot spot) should be near 1.0
         let center_t = state.temperature[idx((N / 2) as i32, 0)];
         assert!(center_t > 0.9, "Bottom center should be hot (near 1.0), got {}", center_t);
@@ -173,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_initial_temperature_top_cold() {
-        let state = SimState::new();
+        let state = SimState::new(400, 0.15);
         for x in 0..N {
             let t = state.temperature[idx(x as i32, (N - 1) as i32)];
             assert!(t < 0.1, "Top should be cold (near 0.0), got {}", t);
@@ -182,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_initial_temperature_gradient() {
-        let state = SimState::new();
+        let state = SimState::new(400, 0.15);
         // Average temperature should decrease from bottom to top
         let avg_bottom: f64 = (0..N).map(|x| state.temperature[idx(x as i32, 0)]).sum::<f64>() / N as f64;
         let avg_mid: f64 = (0..N).map(|x| state.temperature[idx(x as i32, (N / 2) as i32)]).sum::<f64>() / N as f64;
@@ -193,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_initial_velocity_near_zero() {
-        let state = SimState::new();
+        let state = SimState::new(400, 0.15);
         let max_v: f64 = state.vx.iter().chain(state.vy.iter())
             .map(|v| v.abs())
             .fold(0.0, f64::max);
@@ -204,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_all_fields_correct_size() {
-        let state = SimState::new();
+        let state = SimState::new(400, 0.15);
         assert_eq!(state.vx.len(), SIZE);
         assert_eq!(state.vy.len(), SIZE);
         assert_eq!(state.vx0.len(), SIZE);
@@ -234,15 +231,15 @@ mod tests {
 
     #[test]
     fn test_particle_count() {
-        let state = SimState::new();
-        assert_eq!(state.particles_x.len(), NUM_PARTICLES);
-        assert_eq!(state.particles_y.len(), NUM_PARTICLES);
+        let state = SimState::new(400, 0.15);
+        assert_eq!(state.particles_x.len(), 400);
+        assert_eq!(state.particles_y.len(), 400);
     }
 
     #[test]
     fn test_particles_in_domain() {
-        let state = SimState::new();
-        for i in 0..NUM_PARTICLES {
+        let state = SimState::new(400, 0.15);
+        for i in 0..400 {
             let px = state.particles_x[i];
             let py = state.particles_y[i];
             assert!(px >= 0.0 && px < N as f64, "particle x out of range: {}", px);

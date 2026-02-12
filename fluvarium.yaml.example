@@ -1,0 +1,20 @@
+physics:
+  visc: 0.008
+  diff: 0.002
+  dt: 0.003
+  diffuse_iter: 20
+  project_iter: 30
+  heat_buoyancy: 8.0
+  noise_amp: 0.0
+  source_strength: 10.0
+  cool_rate: 8.0
+  bottom_base: 0.15
+
+display:
+  width: 640
+  height: 320
+  tiles: 3
+  target_fps: 60
+  steps_per_frame: 1
+
+particles: 400

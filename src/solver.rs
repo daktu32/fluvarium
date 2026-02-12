@@ -1,15 +1,12 @@
 use crate::state::{idx, N};
 
-/// Base temperature at the bottom wall (away from hot spot).
-const BOTTOM_BASE: f64 = 0.15;
-
 /// Boundary condition handler for top/bottom walls only.
 /// X-axis is periodic (wraps via idx).
 ///   - field_type 0 (scalar): Neumann (copy neighbor) at walls
 ///   - field_type 1 (vx): negate at walls (no-slip)
 ///   - field_type 2 (vy): negate at walls (no-slip + no-penetration)
 ///   - field_type 3 (temperature): top/bottom Dirichlet (hot bottom, cold top)
-pub fn set_bnd(field_type: i32, x: &mut [f64]) {
+pub fn set_bnd(field_type: i32, x: &mut [f64], bottom_base: f64) {
     // Top/bottom walls (y boundaries)
     for i in 0..N {
         match field_type {
@@ -21,7 +18,7 @@ pub fn set_bnd(field_type: i32, x: &mut [f64]) {
                 // Bottom: Gaussian hot spot centered at N/2
                 let dx = i as f64 - (N / 2) as f64;
                 let sigma = (N / 24) as f64;
-                let hot = BOTTOM_BASE + (1.0 - BOTTOM_BASE) * (-dx * dx / (2.0 * sigma * sigma)).exp();
+                let hot = bottom_base + (1.0 - bottom_base) * (-dx * dx / (2.0 * sigma * sigma)).exp();
                 x[idx(i as i32, 0)] = hot;
                 x[idx(i as i32, 1)] = hot;
                 // Top: cold
@@ -38,7 +35,7 @@ pub fn set_bnd(field_type: i32, x: &mut [f64]) {
 
 /// Gauss-Seidel iterative linear solver.
 /// Solves: x[i,j] = (x0[i,j] + a * (neighbors)) / c
-pub fn lin_solve(field_type: i32, x: &mut [f64], x0: &[f64], a: f64, c: f64, iter: usize) {
+pub fn lin_solve(field_type: i32, x: &mut [f64], x0: &[f64], a: f64, c: f64, iter: usize, bottom_base: f64) {
     let c_inv = 1.0 / c;
     for _ in 0..iter {
         for j in 1..(N - 1) {
@@ -50,22 +47,22 @@ pub fn lin_solve(field_type: i32, x: &mut [f64], x0: &[f64], a: f64, c: f64, ite
                 x[idx(i as i32, j as i32)] = (x0[idx(i as i32, j as i32)] + a * neighbors) * c_inv;
             }
         }
-        set_bnd(field_type, x);
+        set_bnd(field_type, x, bottom_base);
     }
 }
 
 /// Diffusion step: spreads the field over time.
 /// a = dt * diff * (N-2)^2, c = 1 + 4a
-pub fn diffuse(field_type: i32, x: &mut [f64], x0: &[f64], diff: f64, dt: f64, iter: usize) {
+pub fn diffuse(field_type: i32, x: &mut [f64], x0: &[f64], diff: f64, dt: f64, iter: usize, bottom_base: f64) {
     let a = dt * diff * ((N - 2) as f64) * ((N - 2) as f64);
     let c = 1.0 + 4.0 * a;
     // Initialize x from x0
     x.copy_from_slice(x0);
-    lin_solve(field_type, x, x0, a, c, iter);
+    lin_solve(field_type, x, x0, a, c, iter, bottom_base);
 }
 
 /// Semi-Lagrangian advection: traces particles backwards through velocity field.
-pub fn advect(field_type: i32, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64], dt: f64) {
+pub fn advect(field_type: i32, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64], dt: f64, bottom_base: f64) {
     let dt0 = dt * (N - 2) as f64;
     let n_f = N as f64;
 
@@ -98,11 +95,11 @@ pub fn advect(field_type: i32, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64]
                 + s1 * (t0 * d0[idx(i1, j0)] + t1 * d0[idx(i1, j1)]);
         }
     }
-    set_bnd(field_type, d);
+    set_bnd(field_type, d, bottom_base);
 }
 
 /// Pressure projection: enforces incompressibility (divergence-free velocity field).
-pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], iter: usize) {
+pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], iter: usize, bottom_base: f64) {
     let h = 1.0 / (N - 2) as f64;
 
     // Calculate divergence
@@ -115,11 +112,11 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
             p[idx(i as i32, j as i32)] = 0.0;
         }
     }
-    set_bnd(0, div);
-    set_bnd(0, p);
+    set_bnd(0, div, bottom_base);
+    set_bnd(0, p, bottom_base);
 
     // Solve for pressure
-    lin_solve(0, p, div, 1.0, 4.0, iter);
+    lin_solve(0, p, div, 1.0, 4.0, iter, bottom_base);
 
     // Subtract pressure gradient from velocity
     for j in 1..(N - 1) {
@@ -130,8 +127,8 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
                 0.5 * (p[idx(i as i32, j as i32 + 1)] - p[idx(i as i32, j as i32 - 1)]) / h;
         }
     }
-    set_bnd(1, vx);
-    set_bnd(2, vy);
+    set_bnd(1, vx, bottom_base);
+    set_bnd(2, vy, bottom_base);
 }
 
 /// Solver parameters for the fluid simulation.
@@ -143,6 +140,9 @@ pub struct SolverParams {
     pub project_iter: usize,
     pub heat_buoyancy: f64,
     pub noise_amp: f64,
+    pub source_strength: f64,
+    pub cool_rate: f64,
+    pub bottom_base: f64,
 }
 
 impl Default for SolverParams {
@@ -155,6 +155,26 @@ impl Default for SolverParams {
             project_iter: 30,
             heat_buoyancy: 8.0,
             noise_amp: 0.0,
+            source_strength: 10.0,
+            cool_rate: 8.0,
+            bottom_base: 0.15,
+        }
+    }
+}
+
+impl From<&crate::config::PhysicsConfig> for SolverParams {
+    fn from(cfg: &crate::config::PhysicsConfig) -> Self {
+        Self {
+            visc: cfg.visc,
+            diff: cfg.diff,
+            dt: cfg.dt,
+            diffuse_iter: cfg.diffuse_iter,
+            project_iter: cfg.project_iter,
+            heat_buoyancy: cfg.heat_buoyancy,
+            noise_amp: cfg.noise_amp,
+            source_strength: cfg.source_strength,
+            cool_rate: cfg.cool_rate,
+            bottom_base: cfg.bottom_base,
         }
     }
 }
@@ -193,11 +213,9 @@ fn inject_thermal_perturbation(
 /// Volumetric heat source at bottom hot spot and Newtonian cooling at top.
 /// This supplements the Dirichlet BCs which alone cannot drive heat into
 /// the interior fast enough (wall velocity ≈ 0, diff is small).
-fn inject_heat_source(temperature: &mut [f64], dt: f64) {
+fn inject_heat_source(temperature: &mut [f64], dt: f64, source_strength: f64, cool_rate: f64) {
     let center = (N / 2) as f64;
     let sigma = (N / 24) as f64; // narrow: ~5 cells
-    let source_strength = 10.0;
-    let cool_rate = 8.0;
 
     // Concentrated heat injection at bottom (rows 2–4)
     for j in 2..5 {
@@ -221,9 +239,9 @@ fn inject_heat_source(temperature: &mut [f64], dt: f64) {
 }
 
 /// Apply buoyancy force: hot fluid rises, cold fluid sinks.
-/// vy += dt * buoyancy * (T - T_ambient), where T_ambient = 0.5
-fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64) {
-    let t_ambient = BOTTOM_BASE;
+/// vy += dt * buoyancy * (T - T_ambient), where T_ambient = bottom_base
+fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64, bottom_base: f64) {
+    let t_ambient = bottom_base;
     for j in 1..(N - 1) {
         for i in 0..N {
             let ii = idx(i as i32, j as i32);
@@ -293,10 +311,11 @@ fn advect_particles(state: &mut crate::state::SimState, dt: f64) {
 /// Full fluid simulation step.
 pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     let dt = params.dt;
+    let bb = params.bottom_base;
 
     // Diffuse velocity
-    diffuse(1, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter);
-    diffuse(2, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter);
+    diffuse(1, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, bb);
+    diffuse(2, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, bb);
 
     // Project to make diffused velocity divergence-free
     project(
@@ -305,14 +324,15 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
         &mut state.work,
         &mut state.work2,
         params.project_iter,
+        bb,
     );
 
     // Advect velocity
-    advect(1, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt);
-    advect(2, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt);
+    advect(1, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, bb);
+    advect(2, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, bb);
 
     // Apply buoyancy with dt scaling
-    apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy, dt);
+    apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy, dt, bb);
 
     // Project BEFORE temperature advection — velocity must be divergence-free
     project(
@@ -321,11 +341,12 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
         &mut state.work,
         &mut state.work2,
         params.project_iter,
+        bb,
     );
 
     // Diffuse + advect temperature with divergence-free velocity
-    diffuse(3, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter);
-    advect(3, &mut state.temperature, &state.work, &state.vx, &state.vy, dt);
+    diffuse(3, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, bb);
+    advect(3, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, bb);
 
     // Inject large-scale temperature perturbation to seed/sustain convection cells
     if params.noise_amp > 0.0 {
@@ -336,7 +357,7 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     // Dirichlet BCs alone can't push heat into the interior (diff too small,
     // velocity zero at walls), so we inject heat directly into the first
     // few interior rows and apply Newtonian cooling near the top.
-    inject_heat_source(&mut state.temperature, dt);
+    inject_heat_source(&mut state.temperature, dt, params.source_strength, params.cool_rate);
 
     // Clamp temperature to physical bounds [0, 1]
     for t in state.temperature.iter_mut() {
@@ -352,6 +373,8 @@ mod tests {
     use super::*;
     use crate::state::{idx, SimState, N, SIZE};
 
+    const BB: f64 = 0.15;
+
     // === Sub-issue 3 tests: lin_solve, diffuse, set_bnd ===
 
     #[test]
@@ -361,7 +384,7 @@ mod tests {
             field[idx(i as i32, 1)] = 42.0;
             field[idx(i as i32, (N - 2) as i32)] = 99.0;
         }
-        set_bnd(0, &mut field);
+        set_bnd(0, &mut field, BB);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0)], 42.0, "Bottom boundary should copy y=1");
             assert_eq!(
@@ -379,7 +402,7 @@ mod tests {
             field[idx(i as i32, 1)] = 5.0;
             field[idx(i as i32, (N - 2) as i32)] = 3.0;
         }
-        set_bnd(1, &mut field);
+        set_bnd(1, &mut field, BB);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0)], -5.0, "vx should negate at bottom (no-slip)");
             assert_eq!(
@@ -397,7 +420,7 @@ mod tests {
             field[idx(i as i32, 1)] = 5.0;
             field[idx(i as i32, (N - 2) as i32)] = 3.0;
         }
-        set_bnd(2, &mut field);
+        set_bnd(2, &mut field, BB);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0)], -5.0, "vy should negate at bottom wall");
             assert_eq!(
@@ -417,7 +440,7 @@ mod tests {
         x0[idx(mid, mid)] = 100.0;
         x.copy_from_slice(&x0);
 
-        lin_solve(0, &mut x, &x0, 1.0, 5.0, 20);
+        lin_solve(0, &mut x, &x0, 1.0, 5.0, 20, BB);
 
         // The spike should have spread
         let center = x[idx(mid, mid)];
@@ -435,7 +458,7 @@ mod tests {
         let mid = (N / 2) as i32;
         x0[idx(mid, mid)] = 100.0;
 
-        diffuse(0, &mut x, &x0, 0.1, 0.1, 4);
+        diffuse(0, &mut x, &x0, 0.1, 0.1, 4, BB);
 
         // After diffusion, energy should spread
         let center = x[idx(mid, mid)];
@@ -460,7 +483,7 @@ mod tests {
             }
         }
 
-        advect(0, &mut d, &d0, &vx, &vy, 0.1);
+        advect(0, &mut d, &d0, &vx, &vy, 0.1, BB);
 
         // With zero velocity, field should be (nearly) unchanged in interior
         for j in 2..(N - 2) {
@@ -486,7 +509,7 @@ mod tests {
         let vx = vec![0.01; SIZE];
         let vy = vec![0.01; SIZE];
 
-        advect(0, &mut d, &d0, &vx, &vy, 0.1);
+        advect(0, &mut d, &d0, &vx, &vy, 0.1, BB);
 
         // Uniform field should remain uniform regardless of velocity
         for j in 2..(N - 2) {
@@ -536,7 +559,7 @@ mod tests {
         }
         assert!(div_before > 0.0, "Should have some initial divergence");
 
-        project(&mut vx, &mut vy, &mut p, &mut div, 40);
+        project(&mut vx, &mut vy, &mut p, &mut div, 40, BB);
 
         // Measure divergence after
         let mut div_after = 0.0;
@@ -560,7 +583,7 @@ mod tests {
 
     #[test]
     fn test_fluid_step_no_panic() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         let params = SolverParams::default();
         // Run a few steps - should not panic
         for _ in 0..3 {
@@ -581,7 +604,7 @@ mod tests {
             }
         }
 
-        apply_buoyancy(&mut vy, &temperature, 1.0, 1.0);
+        apply_buoyancy(&mut vy, &temperature, 1.0, 1.0, BB);
 
         // Hot spot should have stronger upward vy than ambient
         let hot_vy = vy[idx(mid as i32, mid as i32)];
@@ -594,13 +617,13 @@ mod tests {
     #[test]
     fn test_heat_source_boundaries() {
         let mut temperature = vec![0.5; SIZE];
-        set_bnd(3, &mut temperature);
+        set_bnd(3, &mut temperature, BB);
 
-        // Bottom: Gaussian hot spot at center (peak=1.0), base=BOTTOM_BASE at edges
+        // Bottom: Gaussian hot spot at center (peak=1.0), base=BB at edges
         let center_t = temperature[idx((N / 2) as i32, 0)];
         assert!((center_t - 1.0).abs() < 1e-6, "Bottom center should be ~1.0, got {}", center_t);
         let edge_t = temperature[idx(0, 0)];
-        assert!(edge_t >= BOTTOM_BASE - 0.01, "Bottom edge should be >= BOTTOM_BASE, got {}", edge_t);
+        assert!(edge_t >= BB - 0.01, "Bottom edge should be >= BB, got {}", edge_t);
         assert!(edge_t < center_t, "Bottom edge should be cooler than center, got {}", edge_t);
 
         // Top: cold
@@ -617,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_advect_particles_zero_velocity() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         // Zero out velocity
         state.vx.fill(0.0);
         state.vy.fill(0.0);
@@ -643,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_advect_particles_uniform_velocity() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         // Uniform rightward velocity
         state.vx.fill(0.01);
         state.vy.fill(0.0);
@@ -666,7 +689,7 @@ mod tests {
 
     #[test]
     fn test_advect_particles_stay_in_domain() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         let params = SolverParams::default();
 
         // Run 50 steps with active flow
@@ -686,7 +709,7 @@ mod tests {
 
     #[test]
     fn test_convection_maintains_gradient() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         let params = SolverParams::default();
 
         // Run 100 steps
@@ -697,7 +720,7 @@ mod tests {
         // Bottom boundary: Gaussian hot spot + cool base, avg should be above base
         let bottom_avg: f64 =
             (0..N).map(|x| state.temperature[idx(x as i32, 0)]).sum::<f64>() / N as f64;
-        assert!(bottom_avg > BOTTOM_BASE, "Bottom avg should exceed base: {}", bottom_avg);
+        assert!(bottom_avg > BB, "Bottom avg should exceed base: {}", bottom_avg);
 
         // Top boundary should still be cold
         let top_avg: f64 =
@@ -720,7 +743,7 @@ mod tests {
     #[test]
     #[ignore] // diagnostic only — run with: cargo test test_diagnose -- --ignored --nocapture
     fn test_diagnose_vertical_convection() {
-        let mut state = SimState::new();
+        let mut state = SimState::new(400, 0.15);
         let params = SolverParams::default();
 
         // Run 200 fluid steps
@@ -809,6 +832,7 @@ mod tests {
             &state.temperature,
             params.heat_buoyancy,
             params.dt,
+            params.bottom_base,
         );
 
         // Measure buoyancy contribution
@@ -832,6 +856,7 @@ mod tests {
             &mut state.work,
             &mut state.work2,
             params.project_iter,
+            params.bottom_base,
         );
 
         // Measure how much survived after projection

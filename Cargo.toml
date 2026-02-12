@@ -7,3 +7,5 @@ edition = "2024"
 icy_sixel = "0.1"
 ctrlc = "3.4"
 minifb = "0.28.0"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
