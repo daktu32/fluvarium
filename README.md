@@ -41,7 +41,7 @@ cargo install --git https://github.com/daktu32/fludarium
 ### Homebrew (macOS)
 
 ```bash
-brew tap daktu32/fludarium
+brew tap daktu32/fludarium https://github.com/daktu32/fludarium
 brew install fludarium
 ```
 
