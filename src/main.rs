@@ -216,6 +216,65 @@ fn create_sim_state(
     }
 }
 
+/// Channels connecting the main (render) thread to the physics thread.
+struct PhysicsChannels {
+    param_tx: mpsc::Sender<solver::SolverParams>,
+    reset_tx: mpsc::Sender<(state::FluidModel, state::SimState)>,
+    snap_rx: mpsc::Receiver<FrameSnapshot>,
+    snap_return_tx: mpsc::Sender<FrameSnapshot>,
+}
+
+/// Spawn the physics simulation thread and return its channels + join handle.
+fn spawn_physics_thread(
+    model: state::FluidModel,
+    params: solver::SolverParams,
+    num_particles: usize,
+    sim_nx: usize,
+    steps_per_frame: usize,
+    running: Arc<AtomicBool>,
+) -> (PhysicsChannels, std::thread::JoinHandle<()>) {
+    let (param_tx, param_rx) = mpsc::channel::<solver::SolverParams>();
+    let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
+    let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
+    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
+
+    let handle = std::thread::spawn(move || {
+        let mut cur_model = model;
+        let mut sim = create_sim_state(cur_model, &params, num_particles, sim_nx);
+        let mut params = params;
+        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
+
+        while running.load(Ordering::SeqCst) {
+            while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
+                cur_model = new_model;
+                sim = new_sim;
+                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
+            }
+            while let Ok(new_params) = param_rx.try_recv() {
+                params = new_params;
+            }
+            for _ in 0..steps_per_frame {
+                match cur_model {
+                    state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
+                    _ => solver::fluid_step(&mut sim, &params),
+                }
+            }
+            sim.snapshot_into(&mut snap_buf);
+            if snap_tx.send(snap_buf).is_err() {
+                break;
+            }
+            let expected_len = sim.nx * state::N;
+            snap_buf = snap_return_rx.try_recv()
+                .ok()
+                .filter(|b| b.temperature.len() == expected_len)
+                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
+        }
+    });
+
+    let channels = PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx };
+    (channels, handle)
+}
+
 fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, viz_mode: renderer::VizMode) -> String {
     if panel_visible {
         "space=close  ud=nav  lr=adj  ,.=fine  r=reset".to_string()
@@ -357,54 +416,10 @@ fn run_gui() {
     })
     .expect("Error setting Ctrl+C handler");
 
-    // Parameter channel: main → physics thread
-    let (param_tx, param_rx) = mpsc::channel::<solver::SolverParams>();
-
-    // Reset channel: main → physics thread (model switch)
-    let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
-
-    // Physics thread → FrameSnapshot (with return channel for buffer reuse)
-    let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
-    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
-    let physics_running = running.clone();
-    let init_params = current_params.clone();
-    let physics_thread = std::thread::spawn(move || {
-        let mut cur_model = model;
-        let mut sim = create_sim_state(cur_model, &init_params, num_particles, sim_nx);
-        let mut params = init_params;
-        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-
-        while physics_running.load(Ordering::SeqCst) {
-            // Check for model reset
-            while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
-                cur_model = new_model;
-                sim = new_sim;
-                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-            }
-
-            // Drain parameter updates (take latest)
-            while let Ok(new_params) = param_rx.try_recv() {
-                params = new_params;
-            }
-
-            for _ in 0..steps_per_frame {
-                match cur_model {
-                    state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
-                    _ => solver::fluid_step(&mut sim, &params),
-                }
-            }
-            sim.snapshot_into(&mut snap_buf);
-            if snap_tx.send(snap_buf).is_err() {
-                break;
-            }
-            // Reclaim buffer from render thread; discard if size changed (model switch)
-            let expected_len = sim.nx * state::N;
-            snap_buf = snap_return_rx.try_recv()
-                .ok()
-                .filter(|b| b.temperature.len() == expected_len)
-                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
-        }
-    });
+    let (channels, physics_thread) = spawn_physics_thread(
+        model, current_params.clone(), num_particles, sim_nx, steps_per_frame, running.clone(),
+    );
+    let PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx } = channels;
 
     // Overlay state
     let mut overlay_state = overlay::OverlayState::new();
@@ -709,54 +724,10 @@ fn run_headless() {
     })
     .expect("Error setting Ctrl+C handler");
 
-    // Parameter channel: main → physics thread
-    let (param_tx, param_rx) = mpsc::channel::<solver::SolverParams>();
-
-    // Reset channel: main → physics thread (model switch)
-    let (reset_tx, reset_rx) = mpsc::channel::<(state::FluidModel, state::SimState)>();
-
-    // Physics thread → FrameSnapshot (with return channel for buffer reuse)
-    let (snap_tx, snap_rx) = mpsc::sync_channel::<FrameSnapshot>(1);
-    let (snap_return_tx, snap_return_rx) = mpsc::channel::<FrameSnapshot>();
-    let physics_running = running.clone();
-    let init_params = current_params.clone();
-    let physics_thread = std::thread::spawn(move || {
-        let mut cur_model = model;
-        let mut sim = create_sim_state(cur_model, &init_params, num_particles, sim_nx);
-        let mut params = init_params;
-        let mut snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-
-        while physics_running.load(Ordering::SeqCst) {
-            // Check for model reset
-            while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
-                cur_model = new_model;
-                sim = new_sim;
-                snap_buf = FrameSnapshot::new_empty(sim.nx, state::N, num_particles);
-            }
-
-            // Drain parameter updates (take latest)
-            while let Ok(new_params) = param_rx.try_recv() {
-                params = new_params;
-            }
-
-            for _ in 0..steps_per_frame {
-                match cur_model {
-                    state::FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
-                    _ => solver::fluid_step(&mut sim, &params),
-                }
-            }
-            sim.snapshot_into(&mut snap_buf);
-            if snap_tx.send(snap_buf).is_err() {
-                break;
-            }
-            // Reclaim buffer from render thread; discard if size changed (model switch)
-            let expected_len = sim.nx * state::N;
-            snap_buf = snap_return_rx.try_recv()
-                .ok()
-                .filter(|b| b.temperature.len() == expected_len)
-                .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, state::N, num_particles));
-        }
-    });
+    let (channels, physics_thread) = spawn_physics_thread(
+        model, current_params.clone(), num_particles, sim_nx, steps_per_frame, running.clone(),
+    );
+    let PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx } = channels;
 
     // Overlay state
     let mut overlay_state = overlay::OverlayState::new();
