@@ -260,6 +260,7 @@ pub struct SolverParams {
     pub diffuse_iter: usize,
     pub project_iter: usize,
     pub heat_buoyancy: f64,
+    #[allow(dead_code)] // reserved for future use
     pub noise_amp: f64,
     pub source_strength: f64,
     pub cool_rate: f64,
@@ -433,6 +434,27 @@ fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64, b
 
 /// Advect particles through the velocity field using bilinear interpolation.
 /// X wraps (periodic), Y reflects at walls.
+/// Bilinearly interpolate velocity (vx, vy) at grid-relative position.
+/// `i0`, `j0` are the lower-left cell indices; `sx`, `sy` are fractional offsets in [0, 1].
+fn interpolate_velocity(
+    vx: &[f64], vy: &[f64],
+    i0: i32, j0: i32,
+    sx: f64, sy: f64,
+    nx: usize,
+) -> (f64, f64) {
+    let i1 = i0 + 1;
+    let j1 = j0 + 1;
+    let vx_val = (1.0 - sx) * (1.0 - sy) * vx[idx(i0, j0, nx)]
+        + sx * (1.0 - sy) * vx[idx(i1, j0, nx)]
+        + (1.0 - sx) * sy * vx[idx(i0, j1, nx)]
+        + sx * sy * vx[idx(i1, j1, nx)];
+    let vy_val = (1.0 - sx) * (1.0 - sy) * vy[idx(i0, j0, nx)]
+        + sx * (1.0 - sy) * vy[idx(i1, j0, nx)]
+        + (1.0 - sx) * sy * vy[idx(i0, j1, nx)]
+        + sx * sy * vy[idx(i1, j1, nx)];
+    (vx_val, vy_val)
+}
+
 fn advect_particles(state: &mut crate::state::SimState, dt: f64) {
     let nx = state.nx;
     let dt0 = dt * (N - 2) as f64;
@@ -446,19 +468,9 @@ fn advect_particles(state: &mut crate::state::SimState, dt: f64) {
         // Bilinear interpolation of velocity at particle position
         let i0 = px.floor() as i32;
         let j0 = py.floor().max(0.0).min(n_f - 2.0) as i32;
-        let j1 = j0 + 1;
         let sx = px - px.floor();
         let sy = py - j0 as f64;
-
-        let vx_interp = (1.0 - sx) * (1.0 - sy) * state.vx[idx(i0, j0, nx)]
-            + sx * (1.0 - sy) * state.vx[idx(i0 + 1, j0, nx)]
-            + (1.0 - sx) * sy * state.vx[idx(i0, j1, nx)]
-            + sx * sy * state.vx[idx(i0 + 1, j1, nx)];
-
-        let vy_interp = (1.0 - sx) * (1.0 - sy) * state.vy[idx(i0, j0, nx)]
-            + sx * (1.0 - sy) * state.vy[idx(i0 + 1, j0, nx)]
-            + (1.0 - sx) * sy * state.vy[idx(i0, j1, nx)]
-            + sx * sy * state.vy[idx(i0 + 1, j1, nx)];
+        let (vx_interp, vy_interp) = interpolate_velocity(&state.vx, &state.vy, i0, j0, sx, sy, nx);
 
         // Move particle forward
         let new_x = px + dt0 * vx_interp;
@@ -506,20 +518,9 @@ fn advect_particles_karman(state: &mut crate::state::SimState, dt: f64) {
         // Bilinear interpolation of velocity
         let i0 = px.floor().max(0.0).min(nx_f - 2.0) as i32;
         let j0 = py.floor().max(0.0).min(n_f - 2.0) as i32;
-        let j1 = j0 + 1;
-        let i1 = i0 + 1;
         let sx = px - i0 as f64;
         let sy = py - j0 as f64;
-
-        let vx_interp = (1.0 - sx) * (1.0 - sy) * state.vx[idx(i0, j0, nx)]
-            + sx * (1.0 - sy) * state.vx[idx(i1, j0, nx)]
-            + (1.0 - sx) * sy * state.vx[idx(i0, j1, nx)]
-            + sx * sy * state.vx[idx(i1, j1, nx)];
-
-        let vy_interp = (1.0 - sx) * (1.0 - sy) * state.vy[idx(i0, j0, nx)]
-            + sx * (1.0 - sy) * state.vy[idx(i1, j0, nx)]
-            + (1.0 - sx) * sy * state.vy[idx(i0, j1, nx)]
-            + sx * sy * state.vy[idx(i1, j1, nx)];
+        let (vx_interp, vy_interp) = interpolate_velocity(&state.vx, &state.vy, i0, j0, sx, sy, nx);
 
         let new_x = px + dt0 * vx_interp;
         let new_y = (py + dt0 * vy_interp).clamp(2.0, n_f - 3.0);
@@ -1266,6 +1267,40 @@ mod tests {
         // y=2 should NOT be overwritten (remains 0.5)
         let t2 = temperature[idx(0, 2, N)];
         assert!((t2 - 0.5).abs() < 1e-10, "y=2 should remain interior value, got {}", t2);
+    }
+
+    // === Velocity interpolation tests ===
+
+    #[test]
+    fn test_interpolate_velocity_uniform() {
+        // Uniform velocity field → interpolation should return exact value
+        let n = 10;
+        let len = n * n;
+        let vx = vec![3.0; len];
+        let vy = vec![-1.5; len];
+        let (vx_val, vy_val) = interpolate_velocity(&vx, &vy, 2, 3, 0.5, 0.5, n);
+        assert!((vx_val - 3.0).abs() < 1e-10);
+        assert!((vy_val - (-1.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_interpolate_velocity_corner_weights() {
+        // Place known values at 4 corners, verify bilinear blend
+        let n = 10;
+        let len = n * n;
+        let mut vx = vec![0.0; len];
+        // Set corners of cell (2,3): (2,3)=1, (3,3)=2, (2,4)=3, (3,4)=4
+        vx[idx(2, 3, n)] = 1.0;
+        vx[idx(3, 3, n)] = 2.0;
+        vx[idx(2, 4, n)] = 3.0;
+        vx[idx(3, 4, n)] = 4.0;
+        let vy = vec![0.0; len];
+        // At center (sx=0.5, sy=0.5): (1+2+3+4)/4 = 2.5
+        let (vx_val, _) = interpolate_velocity(&vx, &vy, 2, 3, 0.5, 0.5, n);
+        assert!((vx_val - 2.5).abs() < 1e-10, "Expected 2.5, got {vx_val}");
+        // At lower-left corner (sx=0, sy=0): should be 1.0
+        let (vx_val, _) = interpolate_velocity(&vx, &vy, 2, 3, 0.0, 0.0, n);
+        assert!((vx_val - 1.0).abs() < 1e-10);
     }
 
     // === Particle advection tests ===
