@@ -13,6 +13,21 @@ use std::time::{Duration, Instant};
 use minifb::{Key, KeyRepeat, Window, WindowOptions};
 use state::FrameSnapshot;
 
+struct Defaults;
+
+impl Defaults {
+    const MODEL: state::FluidModel = state::FluidModel::KarmanVortex;
+    const WIN_WIDTH: usize = 1280;
+    const WIN_HEIGHT: usize = 640;
+    const TARGET_FPS: usize = 60;
+    const STEPS_PER_FRAME: usize = 1;
+    const NUM_PARTICLES: usize = 400;
+    const RB_TILES: usize = 3;
+    const HEADLESS_WIDTH: usize = 640;
+    const HEADLESS_HEIGHT: usize = 320;
+    const HEADLESS_FRAME_INTERVAL_MS: u64 = 33;
+}
+
 /// Convert RGBA &[u8] buffer to 0RGB &[u32] buffer for minifb.
 fn rgba_to_argb(rgba: &[u8], out: &mut [u32]) {
     for (i, pixel) in rgba.chunks_exact(4).enumerate() {
@@ -70,13 +85,13 @@ fn main() {
 }
 
 fn run_gui() {
-    let mut model = state::FluidModel::KarmanVortex;
-    let win_width = 1280;
-    let win_height = 640;
-    let target_fps = 60;
-    let steps_per_frame = 1;
-    let num_particles = 400;
-    let rb_tiles = 3;
+    let mut model = Defaults::MODEL;
+    let win_width = Defaults::WIN_WIDTH;
+    let win_height = Defaults::WIN_HEIGHT;
+    let target_fps = Defaults::TARGET_FPS;
+    let steps_per_frame = Defaults::STEPS_PER_FRAME;
+    let num_particles = Defaults::NUM_PARTICLES;
+    let rb_tiles = Defaults::RB_TILES;
 
     let mut tiles = 1; // Karman uses tiles=1
 
@@ -406,15 +421,16 @@ fn query_terminal_pixel_size() -> Option<(usize, usize)> {
 fn run_headless() {
     use std::io::Write;
 
-    let model = state::FluidModel::KarmanVortex;
-    let (win_width, win_height) = query_terminal_pixel_size().unwrap_or((640, 320));
-    let steps_per_frame = 1;
-    let num_particles = 400;
+    let model = Defaults::MODEL;
+    let (win_width, win_height) = query_terminal_pixel_size()
+        .unwrap_or((Defaults::HEADLESS_WIDTH, Defaults::HEADLESS_HEIGHT));
+    let steps_per_frame = Defaults::STEPS_PER_FRAME;
+    let num_particles = Defaults::NUM_PARTICLES;
     let tiles = match model {
         state::FluidModel::KarmanVortex => 1,
-        _ => 3,
+        _ => Defaults::RB_TILES,
     };
-    let frame_interval = Duration::from_millis(33); // ~30fps
+    let frame_interval = Duration::from_millis(Defaults::HEADLESS_FRAME_INTERVAL_MS);
 
     let current_params = solver::SolverParams::default_karman();
     let show_vorticity = false;
