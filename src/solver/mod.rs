@@ -10,10 +10,10 @@ pub use boundary::{BoundaryConfig, FieldType};
 pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
-use crate::state::{idx, N};
+use crate::state::N;
 use boundary::BoundaryConfig::{KarmanVortex, RayleighBenard};
 use core::{advect, diffuse, project};
-use karman::{apply_mask, inject_dye, inject_inflow, vorticity_confinement};
+use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
 use particle::{advect_particles, advect_particles_karman};
 use thermal::{apply_buoyancy, inject_heat_source};
 
@@ -31,8 +31,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     project(
         &mut state.vx0,
         &mut state.vy0,
-        &mut state.work,
-        &mut state.work2,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
         params.project_iter,
         &bc,
         nx,
@@ -43,8 +43,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
 
     // Diffuse + advect temperature BEFORE buoyancy so buoyancy uses T^(n+1)
-    diffuse(FieldType::Temperature, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
-    advect(FieldType::Temperature, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
+    diffuse(FieldType::Temperature, &mut state.scratch_a, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Temperature, &mut state.temperature, &state.scratch_a, &state.vx, &state.vy, dt, &bc, nx);
 
     // Volumetric heat source at bottom hot spot + cooling at top.
     inject_heat_source(&mut state.temperature, dt, params.source_strength, params.cool_rate, nx);
@@ -56,8 +56,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     project(
         &mut state.vx,
         &mut state.vy,
-        &mut state.work,
-        &mut state.work2,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
         params.project_iter,
         &bc,
         nx,
@@ -102,19 +102,17 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     project(
         &mut state.vx0,
         &mut state.vy0,
-        &mut state.work,
-        &mut state.work2,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
         params.project_iter,
         &bc,
         nx,
     );
 
-    // 4. Apply mask (zero velocity inside cylinder)
-    std::mem::swap(&mut state.vx, &mut state.vx0);
-    std::mem::swap(&mut state.vy, &mut state.vy0);
-    apply_mask(state);
-    std::mem::swap(&mut state.vx, &mut state.vx0);
-    std::mem::swap(&mut state.vy, &mut state.vy0);
+    // 4. Apply mask to projected velocity (vx0/vy0) before advection
+    if let Some(ref mask) = state.mask {
+        apply_mask_fields(&mut state.vx0, &mut state.vy0, mask);
+    }
 
     // 5. Advect velocity
     advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
@@ -124,8 +122,8 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     project(
         &mut state.vx,
         &mut state.vy,
-        &mut state.work,
-        &mut state.work2,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
         params.project_iter,
         &bc,
         nx,
@@ -139,35 +137,19 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     apply_mask(state);
 
     // 7.6. Tiny wake perturbation to trigger vortex shedding.
-    // Applied just behind the cylinder where the physical instability develops,
-    // rather than at the inflow where it would pollute the entire domain.
-    {
-        let cx = params.cylinder_x as i32;
-        let cy = params.cylinder_y as i32;
-        let r = params.cylinder_radius as i32;
-        let wake_x = cx + r + 2; // 2 cells behind cylinder surface
-        let amp = params.inflow_vel * 0.01;
-        let noise = state.rng.next_f64() * 2.0 - 1.0;
-        // Antisymmetric kick: push vy opposite directions above/below centerline
-        state.vy[idx(wake_x, cy + 1, nx)] += amp * (1.0 + 0.5 * noise);
-        state.vy[idx(wake_x, cy - 1, nx)] -= amp * (1.0 + 0.5 * noise);
-    }
+    inject_wake_perturbation(state, params);
 
     // 8. Diffuse dye (using temperature field as dye)
-    diffuse(FieldType::Scalar, &mut state.work, &state.temperature, diff_k, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Scalar, &mut state.scratch_a, &state.temperature, diff_k, dt, params.diffuse_iter, &bc, nx);
 
     // 9. Advect dye
-    advect(FieldType::Scalar, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
+    advect(FieldType::Scalar, &mut state.temperature, &state.scratch_a, &state.vx, &state.vy, dt, &bc, nx);
 
     // 10. Inject dye at inflow
     inject_dye(state);
 
     // 11. Damp dye inside cylinder
-    if let Some(ref mask) = state.mask {
-        for i in 0..mask.len() {
-            state.temperature[i] *= 1.0 - mask[i];
-        }
-    }
+    damp_dye_in_cylinder(state);
 
     // 12. Clamp dye
     for t in state.temperature.iter_mut() {
@@ -347,8 +329,8 @@ mod tests {
         project(
             &mut state.vx,
             &mut state.vy,
-            &mut state.work,
-            &mut state.work2,
+            &mut state.scratch_a,
+            &mut state.scratch_b,
             params.project_iter,
             &bc,
             N,

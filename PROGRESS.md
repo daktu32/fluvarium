@@ -149,6 +149,13 @@
 - **Step 2.2**: Extracted `interpolate_velocity()` in solver.rs — shared bilinear velocity interpolation between `advect_particles` and `advect_particles_karman`, with 2 precision tests
 - **Phase 3 (YAGNI)**: Deferred trait-based abstractions until 3rd model per Kent Beck's Rule of Three
 
+### Solver/Physics Refactoring (Phase 2)
+- **Phase 1**: Updated `set_bnd_rb` doc comment from numeric `field_type 0/1/2/3` to enum variant names (`FieldType::Scalar/Vx/Vy/Temperature`)
+- **Phase 2**: Added `BoundaryConfig::periodic_x()` and `x_range(nx)` helper methods, eliminated 5 duplicated `matches!`/`match` patterns in `core.rs`
+- **Phase 3**: Added `apply_mask_fields(vx, vy, mask)` to directly damp arbitrary velocity fields, replaced 4-line swap hack in `fluid_step_karman`
+- **Phase 4**: Extracted `inject_wake_perturbation()` and `damp_dye_in_cylinder()` from inline code in `fluid_step_karman`
+- **Phase 5**: Renamed scratch buffers for clarity: `work`→`scratch_a`, `work2`→`scratch_b`, `work3`→`vorticity`, `work4`→`vorticity_abs` with doc comments
+
 ### Legacy Cleanup
 - Removed `src/sixel.rs` and `icy_sixel` dependency (test-only legacy, replaced by iTerm2 protocol)
 - Removed `REVIEW-fluid-simulation.md` (outdated review document)

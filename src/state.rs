@@ -27,10 +27,14 @@ pub struct SimState {
     pub vx0: Vec<f64>,
     pub vy0: Vec<f64>,
     pub temperature: Vec<f64>,
-    pub work: Vec<f64>,
-    pub work2: Vec<f64>,
-    pub work3: Vec<f64>,
-    pub work4: Vec<f64>,
+    /// General-purpose scratch buffer (used for pressure solve / diffused temperature).
+    pub scratch_a: Vec<f64>,
+    /// General-purpose scratch buffer (used for divergence field).
+    pub scratch_b: Vec<f64>,
+    /// Scratch buffer for vorticity values (omega = dvy/dx - dvx/dy).
+    pub vorticity: Vec<f64>,
+    /// Scratch buffer for absolute vorticity (|omega|) used in confinement.
+    pub vorticity_abs: Vec<f64>,
     pub rng: Xor128,
     pub particles_x: Vec<f64>,
     pub particles_y: Vec<f64>,
@@ -246,10 +250,10 @@ impl SimState {
             vx0: vec![0.0; size],
             vy0: vec![0.0; size],
             temperature,
-            work: vec![0.0; size],
-            work2: vec![0.0; size],
-            work3: vec![0.0; size],
-            work4: vec![0.0; size],
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
             rng,
             particles_x,
             particles_y,
@@ -309,10 +313,10 @@ impl SimState {
             vx0: vec![0.0; size],
             vy0: vec![0.0; size],
             temperature,
-            work: vec![0.0; size],
-            work2: vec![0.0; size],
-            work3: vec![0.0; size],
-            work4: vec![0.0; size],
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
             rng,
             particles_x,
             particles_y,
@@ -436,10 +440,10 @@ mod tests {
         assert_eq!(state.vx0.len(), N * N);
         assert_eq!(state.vy0.len(), N * N);
         assert_eq!(state.temperature.len(), N * N);
-        assert_eq!(state.work.len(), N * N);
-        assert_eq!(state.work2.len(), N * N);
-        assert_eq!(state.work3.len(), N * N);
-        assert_eq!(state.work4.len(), N * N);
+        assert_eq!(state.scratch_a.len(), N * N);
+        assert_eq!(state.scratch_b.len(), N * N);
+        assert_eq!(state.vorticity.len(), N * N);
+        assert_eq!(state.vorticity_abs.len(), N * N);
     }
 
     #[test]

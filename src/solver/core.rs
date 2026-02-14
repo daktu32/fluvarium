@@ -8,7 +8,7 @@ pub fn lin_solve(field_type: FieldType, x: &mut [f64], x0: &[f64], a: f64, c: f6
     // All modes iterate over the full X range; set_bnd overwrites boundary
     // cells after each iteration, so including them is harmless and keeps
     // the solver uniform across models.
-    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
+    let periodic_x = bc.periodic_x();
     for _ in 0..iter {
         for j in 1..(N - 1) {
             for i in 0..nx {
@@ -50,12 +50,8 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
     let nx_f = nx as f64;
 
     // For Karman mode, skip X boundary cells to prevent periodic wrap contamination.
-    let (i_lo, i_hi) = match bc {
-        BoundaryConfig::KarmanVortex { .. } => (1, nx - 1),
-        _ => (0, nx),
-    };
-
-    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
+    let (i_lo, i_hi) = bc.x_range(nx);
+    let periodic_x = bc.periodic_x();
 
     for j in 1..(N - 1) {
         for i in i_lo..i_hi {
@@ -106,12 +102,8 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
     let h = 1.0 / (N - 2) as f64;
 
     // For Karman mode, skip X boundary cells to prevent periodic wrap contamination.
-    let (i_lo, i_hi) = match bc {
-        BoundaryConfig::KarmanVortex { .. } => (1, nx - 1),
-        _ => (0, nx),
-    };
-
-    let periodic_x = matches!(bc, BoundaryConfig::RayleighBenard { .. });
+    let (i_lo, i_hi) = bc.x_range(nx);
+    let periodic_x = bc.periodic_x();
 
     // Calculate divergence
     for j in 1..(N - 1) {

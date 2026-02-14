@@ -16,6 +16,23 @@ pub enum BoundaryConfig {
     KarmanVortex { inflow_vel: f64 },
 }
 
+impl BoundaryConfig {
+    /// Whether the X-axis uses periodic (wrapping) boundaries.
+    pub fn periodic_x(&self) -> bool {
+        matches!(self, BoundaryConfig::RayleighBenard { .. })
+    }
+
+    /// X iteration range for interior loops.
+    /// RayleighBenard: full width `(0, nx)` (periodic wrap handled by `idx`).
+    /// KarmanVortex: skip boundary columns `(1, nx-1)`.
+    pub fn x_range(&self, nx: usize) -> (usize, usize) {
+        match self {
+            BoundaryConfig::KarmanVortex { .. } => (1, nx - 1),
+            _ => (0, nx),
+        }
+    }
+}
+
 /// Boundary condition handler.
 /// Dispatches based on BoundaryConfig variant.
 pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: usize) {
@@ -31,10 +48,10 @@ pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: us
 
 /// Rayleigh-Benard boundary conditions.
 /// X-axis is periodic (wraps via idx).
-///   - field_type 0 (scalar): Neumann (copy neighbor) at walls
-///   - field_type 1 (vx): negate at walls (no-slip)
-///   - field_type 2 (vy): negate at walls (no-slip + no-penetration)
-///   - field_type 3 (temperature): top/bottom Dirichlet (hot bottom, cold top)
+///   - `FieldType::Scalar`: Neumann (copy neighbor) at walls
+///   - `FieldType::Vx`: negate at walls (no-slip)
+///   - `FieldType::Vy`: negate at walls (no-slip + no-penetration)
+///   - `FieldType::Temperature`: top/bottom Dirichlet (hot bottom, cold top)
 fn set_bnd_rb(field_type: FieldType, x: &mut [f64], bottom_base: f64, nx: usize) {
     for i in 0..nx {
         match field_type {
