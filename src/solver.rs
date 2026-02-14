@@ -1,5 +1,14 @@
 use crate::state::{idx, N};
 
+/// Field type for boundary condition dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldType {
+    Scalar,
+    Vx,
+    Vy,
+    Temperature,
+}
+
 /// Boundary configuration for different flow models.
 #[derive(Clone)]
 pub enum BoundaryConfig {
@@ -9,7 +18,7 @@ pub enum BoundaryConfig {
 
 /// Boundary condition handler.
 /// Dispatches based on BoundaryConfig variant.
-pub fn set_bnd(field_type: i32, x: &mut [f64], bc: &BoundaryConfig, nx: usize) {
+pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: usize) {
     match bc {
         BoundaryConfig::RayleighBenard { bottom_base } => {
             set_bnd_rb(field_type, x, *bottom_base, nx);
@@ -26,14 +35,14 @@ pub fn set_bnd(field_type: i32, x: &mut [f64], bc: &BoundaryConfig, nx: usize) {
 ///   - field_type 1 (vx): negate at walls (no-slip)
 ///   - field_type 2 (vy): negate at walls (no-slip + no-penetration)
 ///   - field_type 3 (temperature): top/bottom Dirichlet (hot bottom, cold top)
-fn set_bnd_rb(field_type: i32, x: &mut [f64], bottom_base: f64, nx: usize) {
+fn set_bnd_rb(field_type: FieldType, x: &mut [f64], bottom_base: f64, nx: usize) {
     for i in 0..nx {
         match field_type {
-            1 | 2 => {
+            FieldType::Vx | FieldType::Vy => {
                 x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
                 x[idx(i as i32, (N - 1) as i32, nx)] = -x[idx(i as i32, (N - 2) as i32, nx)];
             }
-            3 => {
+            FieldType::Temperature => {
                 // Bottom: Gaussian hot spot centered at nx/2
                 let dx = i as f64 - (nx / 2) as f64;
                 let sigma = (N / 24) as f64;
@@ -56,11 +65,11 @@ fn set_bnd_rb(field_type: i32, x: &mut [f64], bottom_base: f64, nx: usize) {
 /// Left: Dirichlet inflow. Right: zero-gradient outflow.
 /// Top/Bottom: no-slip (negate) for velocity, Neumann for scalars.
 /// Left/Right boundaries take priority over top/bottom at corners.
-fn set_bnd_karman(field_type: i32, x: &mut [f64], inflow_vel: f64, nx: usize) {
+fn set_bnd_karman(field_type: FieldType, x: &mut [f64], inflow_vel: f64, nx: usize) {
     // Pass 1: Top/Bottom walls (y boundaries)
     for i in 0..nx {
         match field_type {
-            1 | 2 => {
+            FieldType::Vx | FieldType::Vy => {
                 // No-slip: negate at walls
                 x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
                 x[idx(i as i32, (N - 1) as i32, nx)] = -x[idx(i as i32, (N - 2) as i32, nx)];
@@ -76,14 +85,14 @@ fn set_bnd_karman(field_type: i32, x: &mut [f64], inflow_vel: f64, nx: usize) {
     // Pass 2: Left/Right walls (x boundaries) — overwrite corners
     for j in 0..N {
         match field_type {
-            1 => {
+            FieldType::Vx => {
                 // Left: Dirichlet inflow
                 x[idx(0, j as i32, nx)] = inflow_vel;
                 x[idx(1, j as i32, nx)] = inflow_vel;
                 // Right: zero-gradient (convective outflow)
                 x[idx((nx - 1) as i32, j as i32, nx)] = x[idx((nx - 2) as i32, j as i32, nx)];
             }
-            2 => {
+            FieldType::Vy => {
                 // Left: vy = 0
                 x[idx(0, j as i32, nx)] = 0.0;
                 x[idx(1, j as i32, nx)] = 0.0;
@@ -101,7 +110,7 @@ fn set_bnd_karman(field_type: i32, x: &mut [f64], inflow_vel: f64, nx: usize) {
 
 /// Gauss-Seidel iterative linear solver.
 /// Solves: x[i,j] = (x0[i,j] + a * (neighbors)) / c
-pub fn lin_solve(field_type: i32, x: &mut [f64], x0: &[f64], a: f64, c: f64, iter: usize, bc: &BoundaryConfig, nx: usize) {
+pub fn lin_solve(field_type: FieldType, x: &mut [f64], x0: &[f64], a: f64, c: f64, iter: usize, bc: &BoundaryConfig, nx: usize) {
     let c_inv = 1.0 / c;
     // For Karman mode, skip X boundary cells to prevent periodic wrap contamination.
     // RB mode uses 0..nx (periodic X via idx wrapping).
@@ -125,7 +134,7 @@ pub fn lin_solve(field_type: i32, x: &mut [f64], x0: &[f64], a: f64, c: f64, ite
 
 /// Diffusion step: spreads the field over time.
 /// a = dt * diff * (N-2)^2, c = 1 + 4a
-pub fn diffuse(field_type: i32, x: &mut [f64], x0: &[f64], diff: f64, dt: f64, iter: usize, bc: &BoundaryConfig, nx: usize) {
+pub fn diffuse(field_type: FieldType, x: &mut [f64], x0: &[f64], diff: f64, dt: f64, iter: usize, bc: &BoundaryConfig, nx: usize) {
     let a = dt * diff * ((N - 2) as f64) * ((N - 2) as f64);
     let c = 1.0 + 4.0 * a;
     // Initialize x from x0
@@ -134,7 +143,7 @@ pub fn diffuse(field_type: i32, x: &mut [f64], x0: &[f64], diff: f64, dt: f64, i
 }
 
 /// Semi-Lagrangian advection: traces particles backwards through velocity field.
-pub fn advect(field_type: i32, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64], dt: f64, bc: &BoundaryConfig, nx: usize) {
+pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: &[f64], dt: f64, bc: &BoundaryConfig, nx: usize) {
     let dt0 = dt * (N - 2) as f64;
     let n_f = N as f64;
     let nx_f = nx as f64;
@@ -202,11 +211,11 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
             p[idx(i as i32, j as i32, nx)] = 0.0;
         }
     }
-    set_bnd(0, div, bc, nx);
-    set_bnd(0, p, bc, nx);
+    set_bnd(FieldType::Scalar, div, bc, nx);
+    set_bnd(FieldType::Scalar, p, bc, nx);
 
     // Solve for pressure
-    lin_solve(0, p, div, 1.0, 4.0, iter, bc, nx);
+    lin_solve(FieldType::Scalar, p, div, 1.0, 4.0, iter, bc, nx);
 
     // Subtract pressure gradient from velocity
     for j in 1..(N - 1) {
@@ -217,8 +226,8 @@ pub fn project(vx: &mut [f64], vy: &mut [f64], p: &mut [f64], div: &mut [f64], i
                 0.5 * (p[idx(i as i32, j as i32 + 1, nx)] - p[idx(i as i32, j as i32 - 1, nx)]) / h;
         }
     }
-    set_bnd(1, vx, bc, nx);
-    set_bnd(2, vy, bc, nx);
+    set_bnd(FieldType::Vx, vx, bc, nx);
+    set_bnd(FieldType::Vy, vy, bc, nx);
 }
 
 /// Solver parameters for the fluid simulation.
@@ -572,8 +581,8 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     inject_inflow(state, params.inflow_vel);
 
     // 2. Diffuse velocity
-    diffuse(1, &mut state.vx0, &state.vx, visc_k, dt, params.diffuse_iter, &bc, nx);
-    diffuse(2, &mut state.vy0, &state.vy, visc_k, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, visc_k, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, visc_k, dt, params.diffuse_iter, &bc, nx);
 
     // 3. Project
     project(
@@ -594,8 +603,8 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     std::mem::swap(&mut state.vy, &mut state.vy0);
 
     // 5. Advect velocity
-    advect(1, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
-    advect(2, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
 
     // 6. Project
     project(
@@ -631,10 +640,10 @@ pub fn fluid_step_karman(state: &mut crate::state::SimState, params: &SolverPara
     }
 
     // 8. Diffuse dye (using temperature field as dye)
-    diffuse(0, &mut state.work, &state.temperature, diff_k, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Scalar, &mut state.work, &state.temperature, diff_k, dt, params.diffuse_iter, &bc, nx);
 
     // 9. Advect dye
-    advect(0, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
+    advect(FieldType::Scalar, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
 
     // 10. Inject dye at inflow
     inject_dye(state);
@@ -662,8 +671,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     let bc = BoundaryConfig::RayleighBenard { bottom_base: params.bottom_base };
 
     // Diffuse velocity
-    diffuse(1, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
-    diffuse(2, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
 
     // Project to make diffused velocity divergence-free
     project(
@@ -677,8 +686,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     );
 
     // Advect velocity
-    advect(1, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
-    advect(2, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
 
     // Apply buoyancy with dt scaling
     apply_buoyancy(&mut state.vy, &state.temperature, params.heat_buoyancy, dt, params.bottom_base, nx);
@@ -695,8 +704,8 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     );
 
     // Diffuse + advect temperature with divergence-free velocity
-    diffuse(3, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
-    advect(3, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
+    diffuse(FieldType::Temperature, &mut state.work, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Temperature, &mut state.temperature, &state.work, &state.vx, &state.vy, dt, &bc, nx);
 
     // Inject large-scale temperature perturbation to seed/sustain convection cells
     if params.noise_amp > 0.0 {
@@ -739,8 +748,8 @@ mod tests {
             field2[idx(i as i32, 1, N)] = 42.0;
             field2[idx(i as i32, (N - 2) as i32, N)] = 99.0;
         }
-        set_bnd(0, &mut field, &bc, N);
-        set_bnd(0, &mut field2, &bc, N);
+        set_bnd(FieldType::Scalar, &mut field, &bc, N);
+        set_bnd(FieldType::Scalar, &mut field2, &bc, N);
         assert_eq!(field, field2);
     }
 
@@ -748,7 +757,7 @@ mod tests {
     fn test_karman_bnd_vx_inflow() {
         let bc = BoundaryConfig::KarmanVortex { inflow_vel: 0.1 };
         let mut field = vec![0.5; N * N];
-        set_bnd(1, &mut field, &bc, N);
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
         // Left boundary: vx = inflow_vel
         for j in 0..N {
             assert_eq!(field[idx(0, j as i32, N)], 0.1, "Left x=0 should be inflow_vel at y={}", j);
@@ -760,7 +769,7 @@ mod tests {
     fn test_karman_bnd_vy_zero() {
         let bc = BoundaryConfig::KarmanVortex { inflow_vel: 0.1 };
         let mut field = vec![0.5; N * N];
-        set_bnd(2, &mut field, &bc, N);
+        set_bnd(FieldType::Vy, &mut field, &bc, N);
         // Left boundary: vy = 0
         for j in 0..N {
             assert_eq!(field[idx(0, j as i32, N)], 0.0, "Left vy should be 0 at y={}", j);
@@ -775,7 +784,7 @@ mod tests {
         for j in 1..(N - 1) {
             field[idx((N - 2) as i32, j as i32, N)] = 0.42;
         }
-        set_bnd(1, &mut field, &bc, N);
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
         // Right boundary should copy from N-2 at interior y positions
         for j in 1..(N - 1) {
             assert_eq!(field[idx((N - 1) as i32, j as i32, N)], 0.42,
@@ -791,7 +800,7 @@ mod tests {
             field[idx(i as i32, 1, N)] = 3.0;
             field[idx(i as i32, (N - 2) as i32, N)] = 5.0;
         }
-        set_bnd(1, &mut field, &bc, N);
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
         // Top/Bottom: negate for no-slip (except left inflow overrides x=0,1)
         assert_eq!(field[idx(10, 0, N)], -3.0, "Bottom should negate for no-slip");
         assert_eq!(field[idx(10, (N - 1) as i32, N)], -5.0, "Top should negate for no-slip");
@@ -970,7 +979,7 @@ mod tests {
         let vx = vec![1.0; N * N]; // large: backtrace would go x < 0
         let vy = vec![0.0; N * N];
 
-        advect(0, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
+        advect(FieldType::Scalar, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
 
         // Interior values should still be well-defined (no wrap artifacts)
         for j in 2..(N - 2) {
@@ -992,7 +1001,7 @@ mod tests {
             field[idx(i as i32, 1, N)] = 42.0;
             field[idx(i as i32, (N - 2) as i32, N)] = 99.0;
         }
-        set_bnd(0, &mut field, &bc, N);
+        set_bnd(FieldType::Scalar, &mut field, &bc, N);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0, N)], 42.0, "Bottom boundary should copy y=1");
             assert_eq!(
@@ -1011,7 +1020,7 @@ mod tests {
             field[idx(i as i32, 1, N)] = 5.0;
             field[idx(i as i32, (N - 2) as i32, N)] = 3.0;
         }
-        set_bnd(1, &mut field, &bc, N);
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0, N)], -5.0, "vx should negate at bottom (no-slip)");
             assert_eq!(
@@ -1030,7 +1039,7 @@ mod tests {
             field[idx(i as i32, 1, N)] = 5.0;
             field[idx(i as i32, (N - 2) as i32, N)] = 3.0;
         }
-        set_bnd(2, &mut field, &bc, N);
+        set_bnd(FieldType::Vy, &mut field, &bc, N);
         for i in 0..N {
             assert_eq!(field[idx(i as i32, 0, N)], -5.0, "vy should negate at bottom wall");
             assert_eq!(
@@ -1050,7 +1059,7 @@ mod tests {
         x0[idx(mid, mid, N)] = 100.0;
         x.copy_from_slice(&x0);
 
-        lin_solve(0, &mut x, &x0, 1.0, 5.0, 20, &bc, N);
+        lin_solve(FieldType::Scalar, &mut x, &x0, 1.0, 5.0, 20, &bc, N);
 
         let center = x[idx(mid, mid, N)];
         let neighbor = x[idx(mid + 1, mid, N)];
@@ -1067,7 +1076,7 @@ mod tests {
         let mid = (N / 2) as i32;
         x0[idx(mid, mid, N)] = 100.0;
 
-        diffuse(0, &mut x, &x0, 0.1, 0.1, 4, &bc, N);
+        diffuse(FieldType::Scalar, &mut x, &x0, 0.1, 0.1, 4, &bc, N);
 
         let center = x[idx(mid, mid, N)];
         let neighbor = x[idx(mid + 1, mid, N)];
@@ -1091,7 +1100,7 @@ mod tests {
             }
         }
 
-        advect(0, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
+        advect(FieldType::Scalar, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
 
         for j in 2..(N - 2) {
             for i in 0..N {
@@ -1114,7 +1123,7 @@ mod tests {
         let vx = vec![0.01; N * N];
         let vy = vec![0.01; N * N];
 
-        advect(0, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
+        advect(FieldType::Scalar, &mut d, &d0, &vx, &vy, 0.1, &bc, N);
 
         for j in 2..(N - 2) {
             for i in 0..N {
@@ -1216,7 +1225,7 @@ mod tests {
     fn test_heat_source_boundaries() {
         let bc = rb_bc();
         let mut temperature = vec![0.5; N * N];
-        set_bnd(3, &mut temperature, &bc, N);
+        set_bnd(FieldType::Temperature, &mut temperature, &bc, N);
 
         // Bottom: Gaussian hot spot at center (peak=1.0), base=BB at edges
         let center_t = temperature[idx((N / 2) as i32, 0, N)];
