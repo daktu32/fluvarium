@@ -262,16 +262,19 @@ fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64) {
     (omega, max_abs)
 }
 
-/// Render field + color bar to RGBA buffer.
+/// Render field + color bar into a pre-allocated RGBA buffer.
+/// The buffer is resized and zeroed as needed.
 /// When `show_vorticity` is true, renders vorticity instead of temperature/dye.
-pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) -> Vec<u8> {
+pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) {
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let frame_width = cfg.frame_width;
     let frame_height = cfg.frame_height;
     let nx = snap.nx;
 
-    let mut buf = vec![0u8; frame_width * frame_height * 4];
+    let total = frame_width * frame_height * 4;
+    buf.resize(total, 0);
+    buf.fill(0);
 
     // Precompute vorticity if needed
     let (vort_field, vort_max) = if show_vorticity {
@@ -401,7 +404,7 @@ pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) ->
         // Value label (vertically centered on tick)
         let label_y = if y >= FONT_HEIGHT / 2 { y - FONT_HEIGHT / 2 } else { 0 };
         let label_y = label_y.min(dh.saturating_sub(FONT_HEIGHT));
-        draw_text(&mut buf, frame_width, label_x, label_y, label, label_color);
+        draw_text(buf, frame_width, label_x, label_y, label, label_color);
     }
 
     // Draw type label above the bar
@@ -414,7 +417,7 @@ pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) ->
     } else {
         bar_x
     };
-    draw_text(&mut buf, frame_width, type_label_x, type_label_y, type_label, [0xAA, 0xAA, 0xAA]);
+    draw_text(buf, frame_width, type_label_x, type_label_y, type_label, [0xAA, 0xAA, 0xAA]);
 
     // Draw particles as 3x3 diamond with adaptive contrast.
     const CORE_BRIGHT: [f64; 3] = [240.0, 240.0, 220.0];
@@ -544,6 +547,13 @@ pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) ->
         }
     }
 
+}
+
+/// Render field + color bar to a new RGBA buffer.
+/// When `show_vorticity` is true, renders vorticity instead of temperature/dye.
+pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, show_vorticity: bool) -> Vec<u8> {
+    let mut buf = Vec::new();
+    render_into(&mut buf, snap, cfg, show_vorticity);
     buf
 }
 
