@@ -167,6 +167,7 @@ fn run_gui() {
 
     // Main thread: render + display
     let mut framebuf = vec![0u32; w * h];
+    let mut rgba_buf: Vec<u8> = Vec::new();
     let mut frame_count = 0u32;
     let mut last_fps_time = Instant::now();
     let mut display_fps: u32;
@@ -318,10 +319,10 @@ fn run_gui() {
         }
 
         if let Some(s) = snap {
-            let mut rgba = renderer::render(&s, &render_cfg, show_vorticity);
-            renderer::render_status(&mut rgba, &render_cfg, &status_text);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, show_vorticity);
+            renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
-                &mut rgba,
+                &mut rgba_buf,
                 render_cfg.frame_width,
                 render_cfg.display_width,
                 render_cfg.display_height,
@@ -329,15 +330,15 @@ fn run_gui() {
                 &current_params,
                 model,
             );
-            rgba_to_argb(&rgba, &mut framebuf);
+            rgba_to_argb(&rgba_buf, &mut framebuf);
             last_snap = Some(s);
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                let mut rgba = renderer::render(s, &render_cfg, show_vorticity);
-                renderer::render_status(&mut rgba, &render_cfg, &status_text);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, show_vorticity);
+                renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
-                    &mut rgba,
+                    &mut rgba_buf,
                     render_cfg.frame_width,
                     render_cfg.display_width,
                     render_cfg.display_height,
@@ -345,7 +346,7 @@ fn run_gui() {
                     &current_params,
                     model,
                 );
-                rgba_to_argb(&rgba, &mut framebuf);
+                rgba_to_argb(&rgba_buf, &mut framebuf);
             }
             needs_redraw = false;
         }
@@ -470,6 +471,7 @@ fn run_headless() {
     let _ = out.flush();
 
     let mut encoder = iterm2::Iterm2Encoder::new();
+    let mut rgba_buf: Vec<u8> = Vec::new();
 
     while running.load(Ordering::SeqCst) {
         let frame_start = Instant::now();
@@ -480,10 +482,10 @@ fn run_headless() {
             Err(_) => break,
         };
 
-        let mut rgba = renderer::render(&snap, &render_cfg, show_vorticity);
-        renderer::render_status(&mut rgba, &render_cfg, &status_text);
+        renderer::render_into(&mut rgba_buf, &snap, &render_cfg, show_vorticity);
+        renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
 
-        let seq = encoder.encode(&rgba, render_cfg.frame_width, render_cfg.frame_height);
+        let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height);
         let _ = write!(out, "\x1b[H"); // cursor home
         let _ = out.write_all(seq);
         let _ = out.flush();
