@@ -216,6 +216,46 @@ fn create_sim_state(
     }
 }
 
+/// Per-model parameter storage with save/restore on model switch.
+struct ModelParams {
+    rb: solver::SolverParams,
+    karman: solver::SolverParams,
+}
+
+impl ModelParams {
+    fn new() -> Self {
+        Self {
+            rb: solver::SolverParams::default(),
+            karman: solver::SolverParams::default_karman(),
+        }
+    }
+
+    fn get(&self, model: state::FluidModel) -> &solver::SolverParams {
+        match model {
+            state::FluidModel::KarmanVortex => &self.karman,
+            _ => &self.rb,
+        }
+    }
+
+    /// Save current params for old_model, toggle to new model, return (new_model, restored_params).
+    fn save_and_switch(
+        &mut self,
+        current: &solver::SolverParams,
+        old_model: state::FluidModel,
+    ) -> (state::FluidModel, solver::SolverParams) {
+        match old_model {
+            state::FluidModel::RayleighBenard => self.rb = current.clone(),
+            state::FluidModel::KarmanVortex => self.karman = current.clone(),
+        }
+        let new_model = match old_model {
+            state::FluidModel::RayleighBenard => state::FluidModel::KarmanVortex,
+            state::FluidModel::KarmanVortex => state::FluidModel::RayleighBenard,
+        };
+        let restored = self.get(new_model).clone();
+        (new_model, restored)
+    }
+}
+
 /// Channels connecting the main (render) thread to the physics thread.
 struct PhysicsChannels {
     param_tx: mpsc::Sender<solver::SolverParams>,
@@ -382,10 +422,8 @@ fn run_gui() {
 
     let mut tiles = 1; // Karman uses tiles=1
 
-    // Per-model parameter storage
-    let mut rb_params = solver::SolverParams::default();
-    let mut karman_params = solver::SolverParams::default_karman();
-    let mut current_params = karman_params.clone();
+    let mut model_params = ModelParams::new();
+    let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
@@ -508,25 +546,13 @@ fn run_gui() {
 
         // M: switch fluid model
         if window.is_key_pressed(Key::M, KeyRepeat::No) {
-            // Save current params for old model
-            match model {
-                state::FluidModel::RayleighBenard => rb_params = current_params.clone(),
-                state::FluidModel::KarmanVortex => karman_params = current_params.clone(),
-            }
-            model = match model {
-                state::FluidModel::RayleighBenard => state::FluidModel::KarmanVortex,
-                state::FluidModel::KarmanVortex => state::FluidModel::RayleighBenard,
-            };
-            // Restore saved params for new model
-            current_params = match model {
-                state::FluidModel::KarmanVortex => karman_params.clone(),
-                _ => rb_params.clone(),
-            };
+            let (new_model, restored) = model_params.save_and_switch(&current_params, model);
+            model = new_model;
+            current_params = restored;
             tiles = match model {
                 state::FluidModel::KarmanVortex => 1,
                 _ => rb_tiles,
             };
-            // Compute NX from current window size
             let (cur_w, cur_h) = window.get_size();
             let new_nx = compute_sim_nx(cur_w, cur_h, model);
             let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
@@ -698,13 +724,8 @@ fn run_headless() {
     // Cap render resolution for performance; terminal upscales via iTerm2 protocol
     let (mut render_w, mut render_h, mut render_scale) = headless_render_dims(term_width, term_height);
 
-    // Per-model parameter storage
-    let mut rb_params = solver::SolverParams::default();
-    let mut karman_params = solver::SolverParams::default_karman();
-    let mut current_params = match model {
-        state::FluidModel::KarmanVortex => karman_params.clone(),
-        _ => rb_params.clone(),
-    };
+    let mut model_params = ModelParams::new();
+    let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
 
@@ -827,19 +848,9 @@ fn run_headless() {
                         needs_redraw = true;
                     }
                     TermKey::Char('m') => {
-                        // Save current params for old model
-                        match model {
-                            state::FluidModel::RayleighBenard => rb_params = current_params.clone(),
-                            state::FluidModel::KarmanVortex => karman_params = current_params.clone(),
-                        }
-                        model = match model {
-                            state::FluidModel::RayleighBenard => state::FluidModel::KarmanVortex,
-                            state::FluidModel::KarmanVortex => state::FluidModel::RayleighBenard,
-                        };
-                        current_params = match model {
-                            state::FluidModel::KarmanVortex => karman_params.clone(),
-                            _ => rb_params.clone(),
-                        };
+                        let (new_model, restored) = model_params.save_and_switch(&current_params, model);
+                        model = new_model;
+                        current_params = restored;
                         tiles = match model {
                             state::FluidModel::KarmanVortex => 1,
                             _ => rb_tiles,
@@ -967,6 +978,26 @@ fn run_headless() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_model_params_save_and_switch() {
+        let mut mp = ModelParams::new();
+        let mut current = mp.get(state::FluidModel::KarmanVortex).clone();
+        // Modify a Karman param
+        current.visc = 0.999;
+        // Switch from Karman → RB
+        let (new_model, restored) = mp.save_and_switch(&current, state::FluidModel::KarmanVortex);
+        assert!(matches!(new_model, state::FluidModel::RayleighBenard));
+        // Restored should be RB defaults
+        assert!((restored.visc - solver::SolverParams::default().visc).abs() < 1e-10);
+        // Saved Karman params should have our modification
+        assert!((mp.karman.visc - 0.999).abs() < 1e-10);
+        // Switch back from RB → Karman
+        let (back_model, back_params) = mp.save_and_switch(&restored, new_model);
+        assert!(matches!(back_model, state::FluidModel::KarmanVortex));
+        // Should get our modified Karman visc back
+        assert!((back_params.visc - 0.999).abs() < 1e-10);
+    }
 
     #[test]
     fn test_pipeline_no_panic() {
