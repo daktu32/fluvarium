@@ -368,12 +368,45 @@ fn run_gui() {
     let _ = physics_thread.join();
 }
 
+/// Query terminal pixel dimensions via TIOCGWINSZ ioctl.
+/// Returns (width_px, height_px) if the terminal reports pixel size.
+#[cfg(target_os = "macos")]
+fn query_terminal_pixel_size() -> Option<(usize, usize)> {
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+
+    unsafe extern "C" {
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
+
+    // TIOCGWINSZ on macOS = _IOR('t', 104, struct winsize) = 0x40087468
+    const TIOCGWINSZ: u64 = 0x40087468;
+
+    let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+    let ret = unsafe { ioctl(1, TIOCGWINSZ, &mut ws as *mut Winsize) };
+
+    if ret == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
+        Some((ws.ws_xpixel as usize, ws.ws_ypixel as usize))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn query_terminal_pixel_size() -> Option<(usize, usize)> {
+    None
+}
+
 fn run_headless() {
     use std::io::Write;
 
     let model = state::FluidModel::KarmanVortex;
-    let win_width = 640;
-    let win_height = 320;
+    let (win_width, win_height) = query_terminal_pixel_size().unwrap_or((640, 320));
     let steps_per_frame = 1;
     let num_particles = 400;
     let tiles = match model {
@@ -563,5 +596,16 @@ mod tests {
 
         assert!(seq.starts_with(b"\x1b]1337;File="));
         assert_eq!(seq.last(), Some(&0x07));
+    }
+
+    #[test]
+    fn test_query_terminal_pixel_size_no_panic() {
+        // In test environments (no real terminal), should return None without panicking
+        let result = query_terminal_pixel_size();
+        // If it returns Some, dimensions should be positive
+        if let Some((w, h)) = result {
+            assert!(w > 0);
+            assert!(h > 0);
+        }
     }
 }
