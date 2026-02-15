@@ -121,6 +121,7 @@
 | **minifb native window** | **~60** | **None (vsync-limited)** |
 | **Headless (pre-opt, 1280×640)** | ~20-25 | PNG encode + stdout I/O (>33ms/frame) |
 | **Headless (post-opt, 640×320)** | **~30** | **None (within 33ms budget)** |
+| **Headless (stored PNG + threaded I/O)** | **~50-60** | **None (within 16ms budget)** |
 
 ## Key Debugging History
 
@@ -217,12 +218,22 @@
 - **Model-aware title**: "fludarium ∣ Kármán Vortex · 45 fps" with proper Unicode (en-dash, accented letters, middle dot)
 - **`model_label()` + `format_title()`** helper functions
 
+### Headless Performance Overhaul
+- **Custom uncompressed PNG encoder**: Replaced `png` crate's `Compression::Fast` (zlib level 1) with hand-written stored deflate encoder — zero hash-table lookups, zero LZ77 matching. CRC-32 table generated at compile time, Adler-32 with NMAX chunking.
+- **RGBA passthrough**: Switched from RGB (color_type=2) to RGBA (color_type=6), eliminating per-pixel RGBA→RGB strip loop (204,800 iterations → 320 per-row bulk memcpy).
+- **Background encoder thread**: Offloaded PNG encode → base64 → stdout pipeline to dedicated thread via `sync_channel(1)`. Main loop only handles rendering (~2ms), I/O blocking no longer affects frame pacing.
+- **Zero-copy buffer recycling**: Replaced `rgba_buf.clone()` (800KB/frame) with `std::mem::take` + return channel. Steady-state: 2 buffers circulating, zero allocations per frame.
+- **60fps target**: `HEADLESS_FRAME_INTERVAL_MS` reduced from 33ms (30fps) to 16ms (60fps), matching GUI mode.
+- **Frame skipping**: `try_send` with `TrySendError::Full` recovery provides natural backpressure — encoder-busy frames are dropped, buffer recovered immediately.
+- 2 new PNG helper tests (CRC-32 + Adler-32 known values), 1 new roundtrip decode test via `png` crate.
+
 ## Test Summary
-- **160 tests, all passing** (1 ignored: diagnostic)
+- **163 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
 - ModelParams save_and_switch test + 2 interpolate_velocity precision tests
 - 3 KH unit tests + 9 KH QA tests (initial conditions, shear maintenance, param defaults)
 - 8 colormap tests (OceanLava + SolarWind endpoints and gradient continuity)
+- CRC-32 + Adler-32 known values + PNG stored-deflate roundtrip decode test
 - `cargo test` succeeds with 0 failures
 
 ### Distribution Setup
