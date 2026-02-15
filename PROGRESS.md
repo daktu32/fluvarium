@@ -197,11 +197,32 @@
 - **9 QA tests + 3 unit tests**: initial conditions, shear profile, boundary conditions, dye interface, perturbation, fluid step stability, param consistency
 - Multi-agent team development: physics-theorist (model design) + rust-architect (code architecture) + qa-agent (quality assurance)
 
+### Per-Model Colormaps & Vorticity Visualization
+- **`ColorMap` enum**: `TokyoNight` (RB), `OceanLava` (KH), `SolarWind` (Kármán) — model-specific palettes
+- **Ocean & Lava**: deep blue → medium blue → white interface → orange → deep red — designed for KH 2-fluid mixing
+- **Solar Wind**: deep space → indigo → violet → magenta → plasma gold — cosmic theme for Kármán dye wake
+- **`map_to_rgba(t, colormap)`**: replaces `temperature_to_rgba()` (kept as `#[cfg(test)]` alias)
+- **Signed vorticity visualization**: diverging blue(−)/red(+) with independent per-sign normalization
+- **Color bar**: model-aware gradient, diverging for vorticity mode
+- 8 new colormap tests (endpoints + gradient continuity for each palette)
+
+### BGM Audio-Visual Sync
+- **mpv IPC socket**: `--input-ipc-server` for programmatic control
+- **Pre-warm pipeline**: spawn mpv paused+muted → unpause to trigger yt-dlp + audio pipeline init → wait for `time-pos` valid → re-pause + seek back + restore volume
+- **Instant unpause**: on first rendered frame, IPC unpause is near-instant since stream is fully loaded
+- **`mpv_ipc()` helper**: send JSON IPC command, read response with timeout
+- **Cleanup**: `BgmGuard::drop` removes IPC socket file
+
+### Window Title Bar
+- **Model-aware title**: "fludarium ∣ Kármán Vortex · 45 fps" with proper Unicode (en-dash, accented letters, middle dot)
+- **`model_label()` + `format_title()`** helper functions
+
 ## Test Summary
-- **152 tests, all passing** (1 ignored: diagnostic)
+- **160 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
 - ModelParams save_and_switch test + 2 interpolate_velocity precision tests
 - 3 KH unit tests + 9 KH QA tests (initial conditions, shear maintenance, param defaults)
+- 8 colormap tests (OceanLava + SolarWind endpoints and gradient continuity)
 - `cargo test` succeeds with 0 failures
 
 ### Distribution Setup

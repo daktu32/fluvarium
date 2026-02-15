@@ -135,6 +135,20 @@ fn rgba_to_argb(rgba: &[u8], out: &mut [u32]) {
     }
 }
 
+/// Short display name for each model (used in window title).
+fn model_label(model: state::FluidModel) -> &'static str {
+    match model {
+        state::FluidModel::RayleighBenard => "Rayleigh\u{2013}B\u{00e9}nard",
+        state::FluidModel::KarmanVortex => "K\u{00e1}rm\u{00e1}n Vortex",
+        state::FluidModel::KelvinHelmholtz => "Kelvin\u{2013}Helmholtz",
+    }
+}
+
+/// Format window title with model name and FPS.
+fn format_title(model: state::FluidModel, fps: u32) -> String {
+    format!("fludarium \u{2223} {} \u{00b7} {} fps", model_label(model), fps)
+}
+
 fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, viz_mode: renderer::VizMode) -> String {
     if panel_visible {
         "space=close  ud=nav  lr=adj  ,.=fine  r=reset".to_string()
@@ -199,22 +213,48 @@ extern "C" fn kill_bgm_process() {
     }
 }
 
-/// RAII guard that kills the bgm process on drop (backup for atexit).
+/// Deterministic socket path for mpv IPC (per-process to avoid collisions).
+fn bgm_socket_path() -> String {
+    format!("/tmp/fludarium-mpv-{}.sock", std::process::id())
+}
+
+/// RAII guard that kills the bgm process and cleans up the IPC socket on drop.
 struct BgmGuard;
 
 impl Drop for BgmGuard {
     fn drop(&mut self) {
         kill_bgm_process();
+        let _ = std::fs::remove_file(bgm_socket_path());
     }
 }
 
-/// Spawn mpv for background music playback. Kills are guaranteed by three layers:
+/// Spawn mpv paused for background music playback.
+/// mpv loads and buffers while paused; call `unpause_bgm()` to start playback.
+/// Kills are guaranteed by three layers:
 /// 1. `atexit` — runs even on `exit()` / framework-driven termination (macOS Cmd+Q)
 /// 2. `ctrlc` handler — runs on SIGINT/SIGTERM
 /// 3. `BgmGuard::drop` — runs on normal scope exit or panic unwind
+/// Send a JSON IPC command to mpv and return the response line.
+fn mpv_ipc(sock: &str, cmd: &[u8]) -> Option<String> {
+    use std::os::unix::net::UnixStream;
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = UnixStream::connect(sock).ok()?;
+    stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    stream.write_all(cmd).ok()?;
+    stream.flush().ok();
+    let mut reader = BufReader::new(&stream);
+    let mut resp = String::new();
+    reader.read_line(&mut resp).ok();
+    Some(resp)
+}
+
 fn spawn_bgm(url: &str) -> Option<BgmGuard> {
+    let sock = bgm_socket_path();
+    let _ = std::fs::remove_file(&sock); // remove stale socket
     let child = std::process::Command::new("mpv")
-        .args(["--no-video", "--really-quiet", url])
+        .args(["--no-video", "--pause", "--volume=0",
+               &format!("--input-ipc-server={}", sock), url])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -222,7 +262,61 @@ fn spawn_bgm(url: &str) -> Option<BgmGuard> {
         .ok()?;
     BGM_PID.store(child.id() as i32, Ordering::SeqCst);
     unsafe { atexit(kill_bgm_process); }
+
+    // Wait for mpv IPC socket to appear.
+    for _ in 0..60 {
+        if std::path::Path::new(&sock).exists() {
+
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !std::path::Path::new(&sock).exists() {
+
+        return Some(BgmGuard);
+    }
+
+    // Pre-warm: unpause (muted) to trigger yt-dlp resolution + audio pipeline init.
+
+    mpv_ipc(&sock, b"{\"command\":[\"set_property\",\"pause\",false]}\n");
+
+    // Wait for playback position to become valid (= audio pipeline ready).
+    let mut start_pos: f64 = 0.0;
+    for _ in 0..100 {
+        if let Some(resp) = mpv_ipc(&sock, b"{\"command\":[\"get_property\",\"time-pos\"]}\n") {
+            // Parse {"data":6141.234,"request_id":0,"error":"success"}
+            if let Some(data_start) = resp.find("\"data\":") {
+                let after = &resp[data_start + 7..];
+                if let Some(end) = after.find(|c: char| c == ',' || c == '}') {
+                    if let Ok(pos) = after[..end].trim().parse::<f64>() {
+                        start_pos = pos;
+
+                        break;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Re-pause, seek back to start position, restore volume.
+
+    mpv_ipc(&sock, b"{\"command\":[\"set_property\",\"pause\",true]}\n");
+    let seek_cmd = format!("{{\"command\":[\"seek\",{},\"absolute\"]}}\n", start_pos);
+    mpv_ipc(&sock, seek_cmd.as_bytes());
+    mpv_ipc(&sock, b"{\"command\":[\"set_property\",\"volume\",100]}\n");
+
+
     Some(BgmGuard)
+}
+
+/// Send unpause command to mpv via its IPC socket (synchronous, instant after pre-warm).
+fn unpause_bgm() {
+    let sock = bgm_socket_path();
+
+    if let Some(_resp) = mpv_ipc(&sock, b"{\"command\":[\"set_property\",\"pause\",false]}\n") {
+
+    }
 }
 
 fn main() {
@@ -235,6 +329,7 @@ fn main() {
 
 fn run_gui() {
     let bgm_child = parse_bgm_url().and_then(|url| spawn_bgm(&url));
+    let mut bgm_started = bgm_child.is_none(); // true if no BGM (nothing to unpause)
 
     let mut model = Defaults::MODEL;
     let win_width = Defaults::WIN_WIDTH;
@@ -261,8 +356,9 @@ fn run_gui() {
     let mut w = render_cfg.frame_width;
     let mut h = render_cfg.frame_height;
 
+    let initial_title = format!("fludarium \u{2223} {}", model_label(model));
     let mut window = Window::new(
-        "fludarium",
+        &initial_title,
         w,
         h,
         WindowOptions {
@@ -434,6 +530,11 @@ fn run_gui() {
         }
 
         if let Some(s) = snap {
+            // Unpause BGM on first rendered frame for audio-visual sync
+            if !bgm_started {
+                bgm_started = true;
+                unpause_bgm();
+            }
             renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
@@ -478,7 +579,7 @@ fn run_gui() {
             display_fps = frame_count;
             frame_count = 0;
             last_fps_time = now;
-            window.set_title(&format!("fludarium — {display_fps} fps"));
+            window.set_title(&format_title(model, display_fps));
         }
     }
 
@@ -542,6 +643,7 @@ fn run_headless() {
     use std::io::Write;
 
     let bgm_child = parse_bgm_url().and_then(|url| spawn_bgm(&url));
+    let mut bgm_started = bgm_child.is_none();
 
     let mut model = Defaults::MODEL;
     let (mut term_width, mut term_height) = query_terminal_pixel_size()
@@ -696,6 +798,7 @@ fn run_headless() {
                         };
                         colormap = match model {
                             state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
+                            state::FluidModel::KarmanVortex => ColorMap::SolarWind,
                             _ => ColorMap::TokyoNight,
                         };
                         let new_nx = compute_sim_nx(term_width, term_height, model);
@@ -755,6 +858,11 @@ fn run_headless() {
         }
 
         if let Some(s) = snap {
+            // Unpause BGM on first rendered frame for audio-visual sync
+            if !bgm_started {
+                bgm_started = true;
+                unpause_bgm();
+            }
             renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
