@@ -28,7 +28,7 @@ impl Defaults {
     const RB_TILES: usize = 1;
     const HEADLESS_WIDTH: usize = 1280;
     const HEADLESS_HEIGHT: usize = 640;
-    const HEADLESS_FRAME_INTERVAL_MS: u64 = 33;
+    const HEADLESS_FRAME_INTERVAL_MS: u64 = 16;
     /// Max pixel count for headless render resolution (~200K pixels).
     /// Terminal upscales via iTerm2's width/height parameters.
     const HEADLESS_MAX_RENDER_PIXELS: usize = 640 * 320;
@@ -639,6 +639,15 @@ fn headless_render_dims(term_w: usize, term_h: usize) -> (usize, usize, f64) {
     (rw, rh, scale)
 }
 
+/// Frame data for the headless background encoder thread.
+struct HeadlessFrame {
+    rgba: Vec<u8>,
+    width: usize,
+    height: usize,
+    disp_w: usize,
+    disp_h: usize,
+}
+
 fn run_headless() {
     use std::io::Write;
 
@@ -696,18 +705,41 @@ fn run_headless() {
     let mut last_snap: Option<FrameSnapshot> = None;
     let mut needs_redraw = false;
 
-    // Terminal setup
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(4 * 1024 * 1024, stdout.lock());
-    let _ = write!(out, "\x1b[?1049h"); // alternate screen
-    let _ = write!(out, "\x1b[?25l"); // hide cursor
-    let _ = write!(out, "\x1b[2J"); // clear screen
-    let _ = out.flush();
+    // Terminal setup (before encoder thread takes over stdout)
+    {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[?1049h\x1b[?25l\x1b[2J");
+        let _ = out.flush();
+    }
 
     // Enter raw terminal mode (RAII — restored on drop)
     let _raw_guard = raw_term::RawTerminal::enter();
 
-    let mut encoder = iterm2::Iterm2Encoder::new();
+    // Background encoder thread: render frames are sent here for
+    // PNG encode → base64 → iTerm2 escape → stdout, decoupling
+    // I/O from the main loop for smooth frame pacing.
+    let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<HeadlessFrame>(1);
+    let (buf_return_tx, buf_return_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let encoder_thread = std::thread::spawn(move || {
+        use std::io::Write;
+        let mut out = std::io::BufWriter::with_capacity(2 * 1024 * 1024, std::io::stdout());
+        let mut encoder = iterm2::Iterm2Encoder::new();
+        while let Ok(frame) = frame_rx.recv() {
+            let seq = encoder.encode(
+                &frame.rgba,
+                frame.width,
+                frame.height,
+                frame.disp_w,
+                frame.disp_h,
+            );
+            let _ = write!(out, "\x1b[H");
+            let _ = out.write_all(seq);
+            let _ = out.flush();
+            // Return RGBA buffer for reuse (avoids allocation per frame)
+            let _ = buf_return_tx.send(frame.rgba);
+        }
+    });
+
     let mut rgba_buf: Vec<u8> = Vec::new();
     let mut stdin_buf = [0u8; 64];
     let mut stdin_pending = 0usize; // bytes in stdin_buf not yet consumed
@@ -863,6 +895,10 @@ fn run_headless() {
                 bgm_started = true;
                 unpause_bgm();
             }
+            // Recover a recycled buffer from the encoder thread (avoids alloc)
+            if rgba_buf.is_empty() {
+                rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
+            }
             renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
@@ -875,10 +911,20 @@ fn run_headless() {
                 model,
             );
 
-            let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height, term_width, term_height);
-            let _ = write!(out, "\x1b[H");
-            let _ = out.write_all(seq);
-            let _ = out.flush();
+            let frame = HeadlessFrame {
+                rgba: std::mem::take(&mut rgba_buf),
+                width: render_cfg.frame_width,
+                height: render_cfg.frame_height,
+                disp_w: term_width,
+                disp_h: term_height,
+            };
+            match frame_tx.try_send(frame) {
+                Ok(()) => {} // sent; buffer returned via buf_return channel
+                Err(std::sync::mpsc::TrySendError::Full(rejected)) => {
+                    rgba_buf = rejected.rgba; // encoder busy, keep buffer
+                }
+                Err(_) => break, // encoder thread died
+            }
             // Return old snapshot buffer to physics thread for reuse
             if let Some(old) = last_snap.take() {
                 let _ = snap_return_tx.send(old);
@@ -887,6 +933,9 @@ fn run_headless() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
+                if rgba_buf.is_empty() {
+                    rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
+                }
                 renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
@@ -899,10 +948,20 @@ fn run_headless() {
                     model,
                 );
 
-                let seq = encoder.encode(&rgba_buf, render_cfg.frame_width, render_cfg.frame_height, term_width, term_height);
-                let _ = write!(out, "\x1b[H");
-                let _ = out.write_all(seq);
-                let _ = out.flush();
+                let frame = HeadlessFrame {
+                    rgba: std::mem::take(&mut rgba_buf),
+                    width: render_cfg.frame_width,
+                    height: render_cfg.frame_height,
+                    disp_w: term_width,
+                    disp_h: term_height,
+                };
+                match frame_tx.try_send(frame) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(rejected)) => {
+                        rgba_buf = rejected.rgba;
+                    }
+                    Err(_) => break,
+                }
             }
             needs_redraw = false;
         }
@@ -914,10 +973,16 @@ fn run_headless() {
         }
     }
 
+    // Shutdown encoder thread (drop sender → recv returns Err → thread exits)
+    drop(frame_tx);
+    let _ = encoder_thread.join();
+
     // Terminal restore (raw mode restored by _raw_guard drop)
-    let _ = write!(out, "\x1b[?25h"); // show cursor
-    let _ = write!(out, "\x1b[?1049l"); // restore main screen
-    let _ = out.flush();
+    {
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[?25h\x1b[?1049l");
+        let _ = out.flush();
+    }
 
     // Shutdown
     running.store(false, Ordering::SeqCst);
