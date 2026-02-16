@@ -7,6 +7,8 @@ pub enum ColorMap {
     OceanLava,
     /// Solar Wind: deep space -> indigo -> violet -> magenta -> plasma gold (for Karman).
     SolarWind,
+    /// Arctic Ice: deep void -> teal -> cyan -> white -> bright mint (for Cavity).
+    ArcticIce,
 }
 
 /// Tokyo Night-inspired color stops for field mapping.
@@ -40,6 +42,16 @@ pub(crate) const SOLAR_WIND_STOPS: [(f64, f64, f64); 5] = [
     (255.0, 220.0, 120.0),// solar plasma gold      (1.00)
 ];
 
+/// Arctic Ice color stops: void -> teal -> cyan -> white -> bright mint.
+/// Designed for Lid-Driven Cavity: velocity magnitude glows like flowing arctic currents.
+pub(crate) const ARCTIC_ICE_STOPS: [(f64, f64, f64); 5] = [
+    (8.0, 10.0, 25.0),    // deep void              (0.00)
+    (10.0, 60.0, 90.0),   // dark teal              (0.25)
+    (30.0, 180.0, 200.0), // bright cyan             (0.50)
+    (200.0, 240.0, 250.0),// near white              (0.75)
+    (120.0, 255.0, 200.0),// bright mint             (1.00)
+];
+
 /// Convert temperature [0.0, 1.0] to RGBA color (Tokyo Night palette).
 #[cfg(test)]
 pub fn temperature_to_rgba(t: f64) -> [u8; 4] {
@@ -52,6 +64,7 @@ pub fn map_to_rgba(t: f64, colormap: ColorMap) -> [u8; 4] {
         ColorMap::TokyoNight => &COLOR_STOPS,
         ColorMap::OceanLava => &OCEAN_LAVA_STOPS,
         ColorMap::SolarWind => &SOLAR_WIND_STOPS,
+        ColorMap::ArcticIce => &ARCTIC_ICE_STOPS,
     };
 
     let t = t.clamp(0.0, 1.0);
@@ -192,6 +205,43 @@ mod tests {
                 assert!(
                     diff <= 5,
                     "SolarWind channel {} jumped by {} between t={} and t={}",
+                    ch, diff, t0, t1
+                );
+            }
+        }
+    }
+
+    // --- Arctic Ice tests ---
+
+    #[test]
+    fn test_arctic_ice_cold_is_deep_void() {
+        let rgba = map_to_rgba(0.0, ColorMap::ArcticIce);
+        assert_eq!(rgba[0], 8, "R");
+        assert_eq!(rgba[1], 10, "G");
+        assert_eq!(rgba[2], 25, "B");
+    }
+
+    #[test]
+    fn test_arctic_ice_hot_is_bright_mint() {
+        let rgba = map_to_rgba(1.0, ColorMap::ArcticIce);
+        assert_eq!(rgba[0], 120, "R");
+        assert_eq!(rgba[1], 255, "G");
+        assert_eq!(rgba[2], 200, "B");
+    }
+
+    #[test]
+    fn test_arctic_ice_gradient_continuity() {
+        let steps = 256;
+        for i in 1..steps {
+            let t0 = (i - 1) as f64 / (steps - 1) as f64;
+            let t1 = i as f64 / (steps - 1) as f64;
+            let c0 = map_to_rgba(t0, ColorMap::ArcticIce);
+            let c1 = map_to_rgba(t1, ColorMap::ArcticIce);
+            for ch in 0..3 {
+                let diff = (c1[ch] as i32 - c0[ch] as i32).abs();
+                assert!(
+                    diff <= 5,
+                    "ArcticIce channel {} jumped by {} between t={} and t={}",
                     ch, diff, t0, t1
                 );
             }

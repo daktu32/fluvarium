@@ -1,8 +1,8 @@
 # fludarium Progress
 
-## Current Status: Modularized Triple-Model Fluid Simulator
+## Current Status: Quad-Model Fluid Simulator
 
-152 tests passing. Codebase modularized into directory-based modules: `solver/` (8 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Triple simulation models (Rayleigh-Benard convection + Kármán vortex street + Kelvin-Helmholtz instability). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. No external config files — all defaults in code.
+181 tests passing. Codebase modularized into directory-based modules: `solver/` (9 files), `renderer/` (3 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). No external config files — all defaults in code.
 
 ## Completed
 
@@ -199,13 +199,13 @@
 - Multi-agent team development: physics-theorist (model design) + rust-architect (code architecture) + qa-agent (quality assurance)
 
 ### Per-Model Colormaps & Vorticity Visualization
-- **`ColorMap` enum**: `TokyoNight` (RB), `OceanLava` (KH), `SolarWind` (Kármán) — model-specific palettes
+- **`ColorMap` enum**: `TokyoNight` (RB), `OceanLava` (KH), `SolarWind` (Kármán), `ArcticIce` (Cavity) — model-specific palettes
 - **Ocean & Lava**: deep blue → medium blue → white interface → orange → deep red — designed for KH 2-fluid mixing
 - **Solar Wind**: deep space → indigo → violet → magenta → plasma gold — cosmic theme for Kármán dye wake
 - **`map_to_rgba(t, colormap)`**: replaces `temperature_to_rgba()` (kept as `#[cfg(test)]` alias)
 - **Signed vorticity visualization**: diverging blue(−)/red(+) with independent per-sign normalization
 - **Color bar**: model-aware gradient, diverging for vorticity mode
-- 8 new colormap tests (endpoints + gradient continuity for each palette)
+- 11 new colormap tests (endpoints + gradient continuity for each palette, including ArcticIce)
 
 ### BGM Audio-Visual Sync
 - **mpv IPC socket**: `--input-ipc-server` for programmatic control
@@ -218,6 +218,20 @@
 - **Model-aware title**: "fludarium ∣ Kármán Vortex · 45 fps" with proper Unicode (en-dash, accented letters, middle dot)
 - **`model_label()` + `format_title()`** helper functions
 
+### Sub-issue 13: Lid-Driven Cavity Model
+- **`FluidModel::LidDrivenCavity`** — fourth simulation model: classic CFD benchmark
+- **Physics**: square box with moving top wall (`lid_velocity=1.0`), all other walls no-slip, generates primary vortex + corner secondary vortices
+- **Boundary conditions**: `BoundaryConfig::LidDrivenCavity { lid_velocity }` — top wall Dirichlet (vx=lid_velocity, vy negated), bottom/left/right no-slip (all velocity negated), scalars Neumann
+- **`solver/cavity.rs` (new)**: `compute_velocity_dye()` — velocity magnitude `sqrt(vx²+vy²)` normalized to [0,1] mapped to temperature field for visualization
+- **`fluid_step_cavity()`**: diffuse → project → advect → project → velocity dye → advect particles
+- **`SolverParams::default_cavity()`**: visc=0.01, diff=0.001, dt=0.05, lid_velocity=1.0, project_iter=30
+- **`solver/core.rs` fix**: advect X-clamping generalized to all non-periodic models (was Karman-only)
+- **Overlay**: 4 adjustable parameters (visc, diff, dt, lid_velocity) with Re display
+- **4-model cycle**: M key cycles RB → Kármán → KH → Cavity → RB (save/restore per-model params)
+- **ArcticIce colormap**: deep void → dark teal → bright cyan → near white → bright mint — velocity magnitude visualization
+- **15 new tests**: state (3), params (1), boundary (6), cavity (3), solver integration (2)
+- Multi-agent team development: solver-agent (rust-architect) for core physics + team lead for UI/colormap
+
 ### Headless Performance Overhaul
 - **Custom uncompressed PNG encoder**: Replaced `png` crate's `Compression::Fast` (zlib level 1) with hand-written stored deflate encoder — zero hash-table lookups, zero LZ77 matching. CRC-32 table generated at compile time, Adler-32 with NMAX chunking.
 - **RGBA passthrough**: Switched from RGB (color_type=2) to RGBA (color_type=6), eliminating per-pixel RGBA→RGB strip loop (204,800 iterations → 320 per-row bulk memcpy).
@@ -228,11 +242,12 @@
 - 2 new PNG helper tests (CRC-32 + Adler-32 known values), 1 new roundtrip decode test via `png` crate.
 
 ## Test Summary
-- **163 tests, all passing** (1 ignored: diagnostic)
+- **181 tests, all passing** (1 ignored: diagnostic)
 - Includes 18 parse_key tests + 2 raw_term smoke tests + iTerm2 display dimension test
-- ModelParams save_and_switch test + 2 interpolate_velocity precision tests
+- ModelParams save_and_switch test (4-model cycle) + 2 interpolate_velocity precision tests
 - 3 KH unit tests + 9 KH QA tests (initial conditions, shear maintenance, param defaults)
-- 8 colormap tests (OceanLava + SolarWind endpoints and gradient continuity)
+- 11 colormap tests (TokyoNight + OceanLava + SolarWind + ArcticIce endpoints and gradient continuity)
+- 15 Lid-Driven Cavity tests (state, params, boundary, cavity dye, solver integration)
 - CRC-32 + Adler-32 known values + PNG stored-deflate roundtrip decode test
 - `cargo test` succeeds with 0 failures
 

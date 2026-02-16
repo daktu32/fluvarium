@@ -15,6 +15,7 @@ pub enum BoundaryConfig {
     RayleighBenard { bottom_base: f64 },
     KarmanVortex { inflow_vel: f64 },
     KelvinHelmholtz,
+    LidDrivenCavity { lid_velocity: f64 },
 }
 
 impl BoundaryConfig {
@@ -24,11 +25,11 @@ impl BoundaryConfig {
     }
 
     /// X iteration range for interior loops.
-    /// RayleighBenard: full width `(0, nx)` (periodic wrap handled by `idx`).
-    /// KarmanVortex: skip boundary columns `(1, nx-1)`.
+    /// RayleighBenard/KelvinHelmholtz: full width `(0, nx)` (periodic wrap handled by `idx`).
+    /// KarmanVortex/LidDrivenCavity: skip boundary columns `(1, nx-1)`.
     pub fn x_range(&self, nx: usize) -> (usize, usize) {
         match self {
-            BoundaryConfig::KarmanVortex { .. } => (1, nx - 1),
+            BoundaryConfig::KarmanVortex { .. } | BoundaryConfig::LidDrivenCavity { .. } => (1, nx - 1),
             _ => (0, nx),
         }
     }
@@ -46,6 +47,9 @@ pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: us
         }
         BoundaryConfig::KelvinHelmholtz => {
             set_bnd_kh(field_type, x, nx);
+        }
+        BoundaryConfig::LidDrivenCavity { lid_velocity } => {
+            set_bnd_cavity(field_type, x, *lid_velocity, nx);
         }
     }
 }
@@ -143,6 +147,51 @@ fn set_bnd_kh(field_type: FieldType, x: &mut [f64], nx: usize) {
                 // Free-slip: Neumann for vx, scalar, temperature
                 x[idx(i as i32, 0, nx)] = x[idx(i as i32, 1, nx)];
                 x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+        }
+    }
+}
+
+/// Lid-Driven Cavity boundary conditions.
+/// Top wall (y=N-1): vx = lid_velocity (driving lid), vy = 0 (no-penetration).
+/// Bottom/Left/Right walls: no-slip (negate interior).
+/// Scalar/Temperature: Neumann (copy neighbor) on all walls.
+fn set_bnd_cavity(field_type: FieldType, x: &mut [f64], lid_velocity: f64, nx: usize) {
+    // Top and Bottom walls (y boundaries)
+    for i in 0..nx {
+        match field_type {
+            FieldType::Vx => {
+                // Bottom: no-slip
+                x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
+                // Top: lid moves at lid_velocity
+                x[idx(i as i32, (N - 1) as i32, nx)] = lid_velocity;
+            }
+            FieldType::Vy => {
+                // Bottom: no-slip + no-penetration
+                x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
+                // Top: no-penetration
+                x[idx(i as i32, (N - 1) as i32, nx)] = -x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+            _ => {
+                // Neumann: copy neighbor
+                x[idx(i as i32, 0, nx)] = x[idx(i as i32, 1, nx)];
+                x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+        }
+    }
+
+    // Left and Right walls (x boundaries)
+    for j in 0..N {
+        match field_type {
+            FieldType::Vx | FieldType::Vy => {
+                // No-slip: negate interior
+                x[idx(0, j as i32, nx)] = -x[idx(1, j as i32, nx)];
+                x[idx((nx - 1) as i32, j as i32, nx)] = -x[idx((nx - 2) as i32, j as i32, nx)];
+            }
+            _ => {
+                // Neumann: copy neighbor
+                x[idx(0, j as i32, nx)] = x[idx(1, j as i32, nx)];
+                x[idx((nx - 1) as i32, j as i32, nx)] = x[idx((nx - 2) as i32, j as i32, nx)];
             }
         }
     }
@@ -306,5 +355,93 @@ mod tests {
         // y=2 should NOT be overwritten (remains 0.5)
         let t2 = temperature[idx(0, 2, N)];
         assert!((t2 - 0.5).abs() < 1e-10, "y=2 should remain interior value, got {}", t2);
+    }
+
+    fn cavity_bc() -> BoundaryConfig {
+        BoundaryConfig::LidDrivenCavity { lid_velocity: 1.0 }
+    }
+
+    #[test]
+    fn test_cavity_bnd_lid_velocity() {
+        let bc = cavity_bc();
+        let mut field = vec![0.5; N * N];
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
+        // Top wall interior: vx should equal lid_velocity
+        // (corners x=0 and x=N-1 are overwritten by left/right wall no-slip)
+        for i in 1..(N - 1) {
+            assert_eq!(
+                field[idx(i as i32, (N - 1) as i32, N)],
+                1.0,
+                "Top wall vx should be lid_velocity at x={}", i
+            );
+        }
+    }
+
+    #[test]
+    fn test_cavity_bnd_noslip_walls() {
+        let bc = cavity_bc();
+        let mut field = vec![0.0; N * N];
+        // Set interior values near walls
+        for i in 0..N {
+            field[idx(i as i32, 1, N)] = 3.0; // near bottom
+        }
+        for j in 0..N {
+            field[idx(1, j as i32, N)] = 5.0; // near left
+        }
+        set_bnd(FieldType::Vx, &mut field, &bc, N);
+        // Bottom wall: vx should negate y=1 (no-slip)
+        // Note: left wall overrides corners, so check interior column
+        assert_eq!(field[idx(10, 0, N)], -3.0, "Bottom wall should negate for no-slip");
+        // Left wall: vx should negate x=1
+        assert_eq!(field[idx(0, 10, N)], -5.0, "Left wall should negate for no-slip");
+    }
+
+    #[test]
+    fn test_cavity_bnd_vy_all_walls_negate() {
+        let bc = cavity_bc();
+        let mut field = vec![0.0; N * N];
+        for i in 0..N {
+            field[idx(i as i32, 1, N)] = 2.0;
+            field[idx(i as i32, (N - 2) as i32, N)] = 4.0;
+        }
+        set_bnd(FieldType::Vy, &mut field, &bc, N);
+        // Bottom and top should negate
+        assert_eq!(field[idx(10, 0, N)], -2.0, "Bottom vy should negate");
+        assert_eq!(field[idx(10, (N - 1) as i32, N)], -4.0, "Top vy should negate");
+    }
+
+    #[test]
+    fn test_cavity_bnd_scalar_neumann() {
+        let bc = cavity_bc();
+        let mut field = vec![0.0; N * N];
+        for i in 0..N {
+            field[idx(i as i32, 1, N)] = 7.0;
+            field[idx(i as i32, (N - 2) as i32, N)] = 9.0;
+        }
+        for j in 0..N {
+            field[idx(1, j as i32, N)] = 11.0;
+            field[idx((N - 2) as i32, j as i32, N)] = 13.0;
+        }
+        set_bnd(FieldType::Scalar, &mut field, &bc, N);
+        // Bottom: copy y=1
+        assert_eq!(field[idx(10, 0, N)], 7.0, "Bottom scalar should copy neighbor");
+        // Top: copy y=N-2
+        assert_eq!(field[idx(10, (N - 1) as i32, N)], 9.0, "Top scalar should copy neighbor");
+        // Left: copy x=1
+        assert_eq!(field[idx(0, 10, N)], 11.0, "Left scalar should copy neighbor");
+        // Right: copy x=N-2
+        assert_eq!(field[idx((N - 1) as i32, 10, N)], 13.0, "Right scalar should copy neighbor");
+    }
+
+    #[test]
+    fn test_cavity_not_periodic() {
+        let bc = cavity_bc();
+        assert!(!bc.periodic_x(), "Cavity should not have periodic X boundaries");
+    }
+
+    #[test]
+    fn test_cavity_x_range() {
+        let bc = cavity_bc();
+        assert_eq!(bc.x_range(N), (1, N - 1), "Cavity should skip boundary columns");
     }
 }

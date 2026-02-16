@@ -3,6 +3,7 @@ pub enum FluidModel {
     RayleighBenard,
     KarmanVortex,
     KelvinHelmholtz,
+    LidDrivenCavity,
 }
 
 impl Default for FluidModel {
@@ -410,6 +411,47 @@ impl SimState {
             trail_count: 0,
         }
     }
+
+    pub fn new_cavity(num_particles: usize, nx: usize) -> Self {
+        let size = nx * N;
+        let mut rng = Xor128::new(42);
+
+        let vx = vec![0.0; size];
+        let vy = vec![0.0; size];
+        let temperature = vec![0.0; size];
+
+        // Random interior particles
+        let mut particles_x = Vec::with_capacity(num_particles);
+        let mut particles_y = Vec::with_capacity(num_particles);
+        for _ in 0..num_particles {
+            let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (nx as f64 - 5.0);
+            let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            particles_x.push(px);
+            particles_y.push(py);
+        }
+
+        Self {
+            nx,
+            vx,
+            vy,
+            vx0: vec![0.0; size],
+            vy0: vec![0.0; size],
+            temperature,
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
+            rng,
+            particles_x,
+            particles_y,
+            mask: None,
+            cylinder: None,
+            trail_xs: vec![Vec::new(); TRAIL_LEN],
+            trail_ys: vec![Vec::new(); TRAIL_LEN],
+            trail_cursor: 0,
+            trail_count: 0,
+        }
+    }
 }
 
 /// Build a fractional mask for a circular cylinder obstacle.
@@ -784,5 +826,37 @@ mod tests {
         let state = SimState::new_kh(10, &params, N);
         let has_nonzero_vy = state.vy.iter().any(|&v| v.abs() > 1e-15);
         assert!(has_nonzero_vy, "vy should have non-zero perturbation for KH instability");
+    }
+
+    #[test]
+    fn test_new_cavity_initial_conditions() {
+        let state = SimState::new_cavity(100, N);
+        // All velocity should be zero
+        assert!(state.vx.iter().all(|&v| v == 0.0), "Cavity vx should be zero initially");
+        assert!(state.vy.iter().all(|&v| v == 0.0), "Cavity vy should be zero initially");
+        // All temperature should be zero
+        assert!(state.temperature.iter().all(|&t| t == 0.0), "Cavity temperature should be zero initially");
+    }
+
+    #[test]
+    fn test_new_cavity_fields_size() {
+        let state = SimState::new_cavity(50, N);
+        let size = N * N;
+        assert_eq!(state.vx.len(), size);
+        assert_eq!(state.vy.len(), size);
+        assert_eq!(state.vx0.len(), size);
+        assert_eq!(state.vy0.len(), size);
+        assert_eq!(state.temperature.len(), size);
+        assert_eq!(state.scratch_a.len(), size);
+        assert_eq!(state.scratch_b.len(), size);
+        assert_eq!(state.particles_x.len(), 50);
+        assert_eq!(state.particles_y.len(), 50);
+    }
+
+    #[test]
+    fn test_new_cavity_no_mask() {
+        let state = SimState::new_cavity(10, N);
+        assert!(state.mask.is_none(), "Cavity should have no mask");
+        assert!(state.cylinder.is_none(), "Cavity should have no cylinder");
     }
 }

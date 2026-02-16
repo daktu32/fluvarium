@@ -93,12 +93,21 @@ const PARAM_DEFS_KH: [ParamDef; 7] = [
     param!("thick","thickness", "shear layer half-width in cells",  shear_thickness, 1.0,    10.0,   0.5,    0.1,     3.0),
 ];
 
+/// Lid-Driven Cavity adjustable parameters.
+const PARAM_DEFS_CAVITY: [ParamDef; 4] = [
+    param!("visc", "viscosity", "velocity viscosity coefficient",  visc,          0.001,  0.1,   0.001,  0.0001,  0.01),
+    param!("diff", "diffusion", "dye diffusion rate",              diff,          0.0,    0.01,  0.0005, 0.0001,  0.001),
+    param!("dt",   "timestep",  "simulation timestep",             dt,            0.005,  0.2,   0.005,  0.001,   0.05),
+    param!("lid",  "lid vel",   "lid (top wall) velocity",         lid_velocity,  0.1,    5.0,   0.1,    0.01,    1.0),
+];
+
 /// Get parameter definitions for the given fluid model.
 pub fn param_defs(model: FluidModel) -> &'static [ParamDef] {
     match model {
         FluidModel::RayleighBenard => &PARAM_DEFS_RB,
         FluidModel::KarmanVortex => &PARAM_DEFS_KARMAN,
         FluidModel::KelvinHelmholtz => &PARAM_DEFS_KH,
+        FluidModel::LidDrivenCavity => &PARAM_DEFS_CAVITY,
     }
 }
 
@@ -267,6 +276,10 @@ pub fn render_overlay(
             format!("karman vortex  re={:.0}", re)
         }
         FluidModel::KelvinHelmholtz => "kelvin helmholtz".to_string(),
+        FluidModel::LidDrivenCavity => {
+            let re = params.lid_velocity * (crate::state::N as f64) / params.visc;
+            format!("lid-driven cavity  re={:.0}", re)
+        }
     };
     renderer::draw_text_sized(buf, frame_width, left, cy, &header, colors::HEADER, cw, ch);
     cy += row_h + 4;

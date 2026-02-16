@@ -68,10 +68,11 @@ pub fn advect(field_type: FieldType, d: &mut [f64], d0: &[f64], vx: &[f64], vy: 
                 y = n_f - 1.5;
             }
 
-            // X clamping for non-periodic Karman mode
-            let x = match bc {
-                BoundaryConfig::KarmanVortex { .. } => x.clamp(0.5, nx_f - 1.5),
-                _ => x, // RB: periodic, no clamping
+            // X clamping for non-periodic modes (Karman, Cavity)
+            let x = if periodic_x {
+                x // periodic: no clamping, idx wraps
+            } else {
+                x.clamp(0.5, nx_f - 1.5)
             };
 
             let j0 = y.floor() as usize;

@@ -1,4 +1,5 @@
 mod boundary;
+mod cavity;
 mod core;
 mod karman;
 mod kh;
@@ -12,7 +13,8 @@ pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
 use crate::state::N;
-use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, RayleighBenard};
+use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, LidDrivenCavity, RayleighBenard};
+use cavity::compute_velocity_dye;
 use core::{advect, diffuse, project};
 use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
 use kh::reinject_shear;
@@ -200,6 +202,33 @@ pub fn fluid_step_kh(state: &mut crate::state::SimState, params: &SolverParams) 
     }
 
     // 9. Advect particles (periodic X, reflected Y -- same as RB)
+    advect_particles(state, dt);
+}
+
+/// Full fluid simulation step for Lid-Driven Cavity.
+pub fn fluid_step_cavity(state: &mut crate::state::SimState, params: &SolverParams) {
+    let dt = params.dt;
+    let nx = state.nx;
+    let bc = LidDrivenCavity { lid_velocity: params.lid_velocity };
+
+    // 1. Diffuse velocity
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
+
+    // 2. Project (divergence-free)
+    project(&mut state.vx0, &mut state.vy0, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 3. Advect velocity
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+
+    // 4. Project again
+    project(&mut state.vx, &mut state.vy, &mut state.scratch_a, &mut state.scratch_b, params.project_iter, &bc, nx);
+
+    // 5. Compute velocity magnitude as visualization dye
+    compute_velocity_dye(state);
+
+    // 6. Advect particles (periodic X, reflected Y)
     advect_particles(state, dt);
 }
 
@@ -497,5 +526,29 @@ mod tests {
             .map(|x| state.vx[idx(x as i32, (N / 4) as i32, N)])
             .sum::<f64>() / N as f64;
         assert!(bot_avg < 0.0, "Bottom quarter average vx should be negative after 100 steps, got {}", bot_avg);
+    }
+
+    #[test]
+    fn test_fluid_step_cavity_no_panic() {
+        let params = SolverParams::default_cavity();
+        let mut state = SimState::new_cavity(100, N);
+        for _ in 0..10 {
+            fluid_step_cavity(&mut state, &params);
+        }
+        // If we reach here, no panic occurred
+    }
+
+    #[test]
+    fn test_cavity_develops_flow() {
+        let params = SolverParams::default_cavity();
+        let mut state = SimState::new_cavity(10, N);
+        for _ in 0..50 {
+            fluid_step_cavity(&mut state, &params);
+        }
+        // After 50 steps with lid driving, interior should have non-zero velocity
+        let max_speed: f64 = state.vx.iter().zip(state.vy.iter())
+            .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+            .fold(0.0_f64, f64::max);
+        assert!(max_speed > 0.01, "Cavity should develop flow from lid driving, max_speed={}", max_speed);
     }
 }

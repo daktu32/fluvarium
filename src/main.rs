@@ -141,6 +141,7 @@ fn model_label(model: state::FluidModel) -> &'static str {
         state::FluidModel::RayleighBenard => "Rayleigh\u{2013}B\u{00e9}nard",
         state::FluidModel::KarmanVortex => "K\u{00e1}rm\u{00e1}n Vortex",
         state::FluidModel::KelvinHelmholtz => "Kelvin\u{2013}Helmholtz",
+        state::FluidModel::LidDrivenCavity => "Lid-Driven Cavity",
     }
 }
 
@@ -177,6 +178,13 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
                 "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params m=model",
                 params.visc, params.dt, params.shear_velocity, params.confinement, num_particles,
             ),
+            state::FluidModel::LidDrivenCavity => {
+                let re = params.lid_velocity * (state::N as f64) / params.visc;
+                format!(
+                    "cavity | visc={:.3} dt={:.3} lid={:.2} re={:.0} | p={} | space=params m=model",
+                    params.visc, params.dt, params.lid_velocity, re, num_particles,
+                )
+            }
         }
     }
 }
@@ -347,6 +355,7 @@ fn run_gui() {
     let mut colormap = match model {
         state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
         state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+        state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
         _ => ColorMap::TokyoNight,
     };
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
@@ -481,6 +490,7 @@ fn run_gui() {
             colormap = match model {
                 state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
                 state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+                state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
                 _ => ColorMap::TokyoNight,
             };
             let (cur_w, cur_h) = window.get_size();
@@ -675,6 +685,7 @@ fn run_headless() {
     let mut colormap = match model {
         state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
         state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+        state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
         _ => ColorMap::TokyoNight,
     };
     let mut status_text = format_status(&current_params, tiles, num_particles, false, model, viz_mode);
@@ -831,6 +842,7 @@ fn run_headless() {
                         colormap = match model {
                             state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
                             state::FluidModel::KarmanVortex => ColorMap::SolarWind,
+                            state::FluidModel::LidDrivenCavity => ColorMap::ArcticIce,
                             _ => ColorMap::TokyoNight,
                         };
                         let new_nx = compute_sim_nx(term_width, term_height, model);
