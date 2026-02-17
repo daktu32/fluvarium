@@ -43,7 +43,8 @@ pub fn parse_key(buf: &[u8]) -> (Option<TermKey>, usize) {
         0x20 => (Some(TermKey::Space), 1),
         b',' => (Some(TermKey::Comma), 1),
         b'.' => (Some(TermKey::Period), 1),
-        b'q' | b'r' | b'm' | b'v' => (Some(TermKey::Char(buf[0] as char)), 1),
+        b'q' | b'r' | b'm' | b'v' | b'a' | b'f' | b'p' | b'c'
+        | b'[' | b']' => (Some(TermKey::Char(buf[0] as char)), 1),
         _ => (None, 1),
     }
 }

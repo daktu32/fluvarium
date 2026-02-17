@@ -2,8 +2,11 @@ mod input;
 mod iterm2;
 mod overlay;
 mod physics;
+mod playback;
 mod renderer;
 mod solver;
+mod spherical;
+mod spgrid;
 mod state;
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -152,11 +155,11 @@ fn format_title(model: state::FluidModel, fps: u32) -> String {
 
 fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usize, panel_visible: bool, model: state::FluidModel, viz_mode: renderer::VizMode) -> String {
     if panel_visible {
-        "space=close  ud=nav  lr=adj  ,.=fine  r=reset".to_string()
+        "space=close  ud=nav  lr=adj  ,.=fine  d=default".to_string()
     } else {
         match model {
             state::FluidModel::RayleighBenard => format!(
-                "visc={:.3} diff={:.3} dt={:.3} buoy={:.1} src={:.1} cool={:.1} base={:.2} | tiles={} p={} | space=params m=model",
+                "visc={:.3} diff={:.3} dt={:.3} buoy={:.1} src={:.1} cool={:.1} base={:.2} | tiles={} p={} | space=params a=arrows r=restart m=model",
                 params.visc, params.diff, params.dt,
                 params.heat_buoyancy, params.source_strength, params.cool_rate,
                 params.bottom_base, tiles, num_particles,
@@ -170,18 +173,18 @@ fn format_status(params: &solver::SolverParams, tiles: usize, num_particles: usi
                     renderer::VizMode::None => "none",
                 };
                 format!(
-                    "karman [{viz}] | visc={:.3} dt={:.3} u0={:.2} re={:.0} | p={} | space=params v=viz m=model",
+                    "karman [{viz}] | visc={:.3} dt={:.3} u0={:.2} re={:.0} | p={} | space=params v=viz a=arrows m=model",
                     params.visc, params.dt, params.inflow_vel, re, num_particles,
                 )
             }
             state::FluidModel::KelvinHelmholtz => format!(
-                "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params m=model",
+                "kh | visc={:.4} dt={:.3} shear={:.3} conf={:.1} | p={} | space=params a=arrows r=restart m=model",
                 params.visc, params.dt, params.shear_velocity, params.confinement, num_particles,
             ),
             state::FluidModel::LidDrivenCavity => {
                 let re = params.lid_velocity * (state::N as f64) / params.visc;
                 format!(
-                    "cavity | visc={:.3} dt={:.3} lid={:.2} re={:.0} | p={} | space=params m=model",
+                    "cavity | visc={:.3} dt={:.3} lid={:.2} re={:.0} | p={} | space=params a=arrows r=restart m=model",
                     params.visc, params.dt, params.lid_velocity, re, num_particles,
                 )
             }
@@ -200,6 +203,14 @@ fn make_render_cfg(w: usize, h: usize, tiles: usize, sim_nx: usize, model: state
 
 fn is_headless() -> bool {
     std::env::args().any(|a| a == "--headless")
+}
+
+/// Parse `--playback <dir>` from CLI args.
+fn parse_playback_dir() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--playback")
+        .map(|w| w[1].clone())
 }
 
 /// Parse `--bgm <URL>` from CLI args.
@@ -337,7 +348,9 @@ fn unpause_bgm() {
 }
 
 fn main() {
-    if is_headless() {
+    if let Some(dir) = parse_playback_dir() {
+        run_gui_playback(&dir);
+    } else if is_headless() {
         run_headless();
     } else {
         run_gui();
@@ -361,6 +374,7 @@ fn run_gui() {
     let mut model_params = ModelParams::new();
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
+    let mut show_arrows = false;
     let mut colormap = match model {
         state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
         state::FluidModel::KarmanVortex => ColorMap::SolarWind,
@@ -478,8 +492,8 @@ fn run_gui() {
                 needs_redraw = true;
             }
 
-            // R: reset selected parameter to default
-            if window.is_key_pressed(Key::R, KeyRepeat::No) {
+            // D: reset selected parameter to default
+            if window.is_key_pressed(Key::D, KeyRepeat::No) {
                 overlay::reset_param(&mut current_params, overlay_state.selected, model);
                 let _ = param_tx.send(current_params.clone());
                 status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
@@ -518,10 +532,30 @@ fn run_gui() {
             needs_redraw = true;
         }
 
+        // R: restart current model simulation (works with overlay open too)
+        if window.is_key_pressed(Key::R, KeyRepeat::No) {
+            let (cur_w, cur_h) = window.get_size();
+            let new_nx = compute_sim_nx(cur_w, cur_h, model);
+            let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
+            let _ = reset_tx.send((model, new_sim));
+            render_cfg = make_render_cfg(cur_w, cur_h, tiles, new_nx, model);
+            w = render_cfg.frame_width;
+            h = render_cfg.frame_height;
+            framebuf = vec![0u32; w * h];
+            last_snap = None;
+            needs_redraw = true;
+        }
+
         // V: cycle visualization mode
         if window.is_key_pressed(Key::V, KeyRepeat::No) {
             viz_mode = viz_mode.next();
             status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
+            needs_redraw = true;
+        }
+
+        // A: toggle arrow overlay
+        if window.is_key_pressed(Key::A, KeyRepeat::No) {
+            show_arrows = !show_arrows;
             needs_redraw = true;
         }
 
@@ -554,7 +588,7 @@ fn run_gui() {
                 bgm_started = true;
                 unpause_bgm();
             }
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -575,7 +609,7 @@ fn run_gui() {
             needs_redraw = false;
         } else if needs_redraw {
             if let Some(ref s) = last_snap {
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -693,6 +727,7 @@ fn run_headless() {
     let mut model_params = ModelParams::new();
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
+    let mut show_arrows = false;
     let mut colormap = match model {
         state::FluidModel::KelvinHelmholtz => ColorMap::OceanLava,
         state::FluidModel::KarmanVortex => ColorMap::SolarWind,
@@ -836,10 +871,22 @@ fn run_headless() {
                         }
                         needs_redraw = true;
                     }
-                    TermKey::Char('r') if overlay_state.visible => {
+                    TermKey::Char('d') if overlay_state.visible => {
                         overlay::reset_param(&mut current_params, overlay_state.selected, model);
                         let _ = param_tx.send(current_params.clone());
                         status_text = format_status(&current_params, tiles, num_particles, true, model, viz_mode);
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('r') => {
+                        // R: restart current model simulation
+                        let new_nx = compute_sim_nx(term_width, term_height, model);
+                        let new_sim = create_sim_state(model, &current_params, num_particles, new_nx);
+                        let _ = reset_tx.send((model, new_sim));
+                        render_cfg = make_render_cfg(render_w, render_h, tiles, new_nx, model);
+                        if render_scale < 1.0 {
+                            render_cfg.particle_radius = 0;
+                        }
+                        last_snap = None;
                         needs_redraw = true;
                     }
                     TermKey::Char('m') => {
@@ -872,6 +919,10 @@ fn run_headless() {
                     TermKey::Char('v') => {
                         viz_mode = viz_mode.next();
                         status_text = format_status(&current_params, tiles, num_particles, overlay_state.visible, model, viz_mode);
+                        needs_redraw = true;
+                    }
+                    TermKey::Char('a') => {
+                        show_arrows = !show_arrows;
                         needs_redraw = true;
                     }
                     _ => {}
@@ -922,7 +973,7 @@ fn run_headless() {
             if rgba_buf.is_empty() {
                 rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
             }
-            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap);
+            renderer::render_into(&mut rgba_buf, &s, &render_cfg, viz_mode, colormap, show_arrows);
             renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
             overlay::render_overlay(
                 &mut rgba_buf,
@@ -960,7 +1011,7 @@ fn run_headless() {
                 if rgba_buf.is_empty() {
                     rgba_buf = buf_return_rx.try_recv().unwrap_or_default();
                 }
-                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap);
+                renderer::render_into(&mut rgba_buf, s, &render_cfg, viz_mode, colormap, show_arrows);
                 renderer::render_status(&mut rgba_buf, &render_cfg, &status_text);
                 overlay::render_overlay(
                     &mut rgba_buf,
@@ -1014,6 +1065,265 @@ fn run_headless() {
     drop(snap_rx);
     let _ = physics_thread.join();
     drop(bgm_child); // BgmGuard::drop kills mpv
+}
+
+fn run_gui_playback(dir: &str) {
+    use renderer::spherical::{
+        Projection, SphericalRenderConfig, render_equirectangular, render_orthographic,
+    };
+
+    eprintln!("Loading {dir}...");
+    let reader = spgrid::SpgReader::open(dir).unwrap_or_else(|e| {
+        eprintln!("Error opening {dir}: {e}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "  model={}, grid={}x{} T{}, {} frames, fields={:?}",
+        reader.manifest.model,
+        reader.manifest.grid.im,
+        reader.manifest.grid.jm,
+        reader.manifest.grid.nm,
+        reader.manifest.frames.len(),
+        reader.manifest.fields,
+    );
+
+    let mut pb = playback::PlaybackState::from_reader(&reader).unwrap_or_else(|e| {
+        eprintln!("Error reading frames: {e}");
+        std::process::exit(1);
+    });
+    eprintln!("  {} frames loaded.", pb.frame_count());
+
+    let win_width = Defaults::WIN_WIDTH;
+    let win_height = Defaults::WIN_HEIGHT;
+    let target_fps = Defaults::TARGET_FPS;
+
+    let mut projection = Projection::Equirectangular;
+    let mut colormap = ColorMap::BlueWhiteRed;
+    let mut cam_lat = 0.0_f64;
+    let mut cam_lon = 0.0_f64;
+
+    let title = format!(
+        "fludarium \u{2223} {} \u{00b7} {}",
+        pb.model_name,
+        projection.label()
+    );
+    let mut window = Window::new(
+        &title,
+        win_width,
+        win_height,
+        WindowOptions {
+            resize: true,
+            ..WindowOptions::default()
+        },
+    )
+    .expect("Failed to create window");
+
+    window.set_target_fps(target_fps);
+
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl+C handler");
+
+    let colormaps = [
+        ColorMap::BlueWhiteRed,
+        ColorMap::OceanLava,
+        ColorMap::TokyoNight,
+        ColorMap::SolarWind,
+        ColorMap::ArcticIce,
+    ];
+    let mut colormap_idx = 0;
+
+    let mut framebuf = vec![0u32; win_width * win_height];
+    let mut rgba_buf: Vec<u8> = Vec::new();
+    let mut last_time = Instant::now();
+    let mut frame_count = 0u32;
+    let mut last_fps_time = Instant::now();
+    #[allow(unused_assignments)]
+    let mut display_fps: u32 = 0;
+    let mut needs_redraw = true;
+
+    while window.is_open() && running.load(Ordering::SeqCst) {
+        let now = Instant::now();
+        let dt = now.duration_since(last_time).as_secs_f64();
+        last_time = now;
+
+        // Keyboard
+        if window.is_key_pressed(Key::Escape, KeyRepeat::No)
+            || window.is_key_pressed(Key::Q, KeyRepeat::No)
+        {
+            break;
+        }
+
+        if window.is_key_pressed(Key::Space, KeyRepeat::No) {
+            pb.toggle_play();
+            needs_redraw = true;
+        }
+
+        if window.is_key_pressed(Key::Right, KeyRepeat::Yes) {
+            if projection == Projection::Orthographic {
+                cam_lon += 10.0_f64.to_radians();
+                needs_redraw = true;
+            } else {
+                pb.step_forward();
+                needs_redraw = true;
+            }
+        }
+        if window.is_key_pressed(Key::Left, KeyRepeat::Yes) {
+            if projection == Projection::Orthographic {
+                cam_lon -= 10.0_f64.to_radians();
+                needs_redraw = true;
+            } else {
+                pb.step_backward();
+                needs_redraw = true;
+            }
+        }
+        if window.is_key_pressed(Key::Up, KeyRepeat::Yes) {
+            if projection == Projection::Orthographic {
+                cam_lat = (cam_lat + 5.0_f64.to_radians()).min(std::f64::consts::FRAC_PI_2);
+                needs_redraw = true;
+            }
+        }
+        if window.is_key_pressed(Key::Down, KeyRepeat::Yes) {
+            if projection == Projection::Orthographic {
+                cam_lat = (cam_lat - 5.0_f64.to_radians()).max(-std::f64::consts::FRAC_PI_2);
+                needs_redraw = true;
+            }
+        }
+
+        if window.is_key_pressed(Key::LeftBracket, KeyRepeat::No) {
+            pb.speed_down();
+            needs_redraw = true;
+        }
+        if window.is_key_pressed(Key::RightBracket, KeyRepeat::No) {
+            pb.speed_up();
+            needs_redraw = true;
+        }
+
+        if window.is_key_pressed(Key::F, KeyRepeat::No) {
+            pb.next_field();
+            needs_redraw = true;
+        }
+
+        if window.is_key_pressed(Key::P, KeyRepeat::No) {
+            projection = projection.toggle();
+            needs_redraw = true;
+        }
+
+        if window.is_key_pressed(Key::C, KeyRepeat::No) {
+            colormap_idx = (colormap_idx + 1) % colormaps.len();
+            colormap = colormaps[colormap_idx];
+            needs_redraw = true;
+        }
+
+        // Advance playback
+        let prev_frame = pb.current_frame;
+        pb.tick(dt);
+        if pb.current_frame != prev_frame {
+            needs_redraw = true;
+        }
+
+        let (cur_w, cur_h) = window.get_size();
+
+        if needs_redraw {
+            let snap = pb.snapshot();
+            let gauss = pb.gauss_nodes();
+
+            match projection {
+                Projection::Equirectangular => {
+                    let cfg = SphericalRenderConfig::equirectangular(cur_w, cur_h);
+                    render_equirectangular(&mut rgba_buf, &snap, gauss, &cfg, colormap);
+
+                    // Status bar
+                    let status = format!(
+                        "frame {}/{} t={:.3} [{}] x{:.1} | {}",
+                        pb.current_frame,
+                        pb.frame_count(),
+                        snap.time,
+                        snap.field_name,
+                        pb.speed,
+                        if pb.playing { ">" } else { "||" },
+                    );
+                    renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
+                        display_width: cfg.display_width,
+                        display_height: cfg.display_height,
+                        frame_width: cfg.frame_width,
+                        frame_height: cfg.frame_height,
+                        tiles: 1,
+                        sim_nx: snap.im,
+                        particle_radius: 0,
+                        display_x_offset: 0,
+                    }, &status);
+
+                    let w = cfg.frame_width;
+                    let h = cfg.frame_height;
+                    framebuf.resize(w * h, 0);
+                    rgba_to_argb(&rgba_buf, &mut framebuf);
+                    window.update_with_buffer(&framebuf, w, h).unwrap();
+                }
+                Projection::Orthographic => {
+                    let cfg = SphericalRenderConfig::orthographic(cur_w, cur_h);
+                    render_orthographic(
+                        &mut rgba_buf, &snap, gauss, &cfg, colormap, cam_lat, cam_lon,
+                    );
+
+                    let status = format!(
+                        "frame {}/{} t={:.3} [{}] x{:.1} | {} | lat={:.0} lon={:.0}",
+                        pb.current_frame,
+                        pb.frame_count(),
+                        snap.time,
+                        snap.field_name,
+                        pb.speed,
+                        if pb.playing { ">" } else { "||" },
+                        cam_lat.to_degrees(),
+                        cam_lon.to_degrees(),
+                    );
+                    renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
+                        display_width: cfg.display_width,
+                        display_height: cfg.display_height,
+                        frame_width: cfg.frame_width,
+                        frame_height: cfg.frame_height,
+                        tiles: 1,
+                        sim_nx: snap.im,
+                        particle_radius: 0,
+                        display_x_offset: 0,
+                    }, &status);
+
+                    let w = cfg.frame_width;
+                    let h = cfg.frame_height;
+                    framebuf.resize(w * h, 0);
+                    rgba_to_argb(&rgba_buf, &mut framebuf);
+                    window.update_with_buffer(&framebuf, w, h).unwrap();
+                }
+            }
+
+            needs_redraw = false;
+        } else {
+            // Still need to call update to process events
+            let (_w, _h) = (framebuf.len().max(1), 1);
+            // Use current framebuf size
+            let total = cur_w * cur_h;
+            if framebuf.len() == total {
+                window.update_with_buffer(&framebuf, cur_w, cur_h).unwrap();
+            } else {
+                window.update();
+            }
+        }
+
+        frame_count += 1;
+        if now.duration_since(last_fps_time) >= Duration::from_secs(1) {
+            display_fps = frame_count;
+            frame_count = 0;
+            last_fps_time = now;
+            let proj_label = projection.label();
+            window.set_title(&format!(
+                "fludarium \u{2223} {} \u{00b7} {} \u{00b7} {} fps",
+                pb.model_name, proj_label, display_fps
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

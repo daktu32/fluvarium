@@ -1,5 +1,6 @@
 mod color;
 mod font;
+pub mod spherical;
 
 // Re-export public API
 pub use color::ColorMap;
@@ -206,9 +207,38 @@ fn screen_blend(buf: &mut [u8], off: usize, r: f64, g: f64, b: f64, alpha: f64) 
     buf[off + 2] = (bb + fb - bb * fb / 255.0).min(255.0) as u8;
 }
 
+/// Bresenham line drawing with alpha-blended color.
+/// Draws from (x0,y0) to (x1,y1) in screen coordinates, applying x_off to buffer offset.
+fn draw_line_blended(
+    buf: &mut [u8], frame_width: usize,
+    x0: isize, y0: isize, x1: isize, y1: isize,
+    dw: usize, dh: usize, x_off: usize,
+    color: [f64; 3], alpha: f64,
+    blend: fn(&mut [u8], usize, f64, f64, f64, f64),
+) {
+    let mut cx = x0;
+    let mut cy = y0;
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx: isize = if x0 < x1 { 1 } else { -1 };
+    let sy: isize = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        if cx >= 0 && (cx as usize) < dw && cy >= 0 && (cy as usize) < dh {
+            let off = (cy as usize * frame_width + cx as usize + x_off) * 4;
+            blend(buf, off, color[0], color[1], color[2], alpha);
+        }
+        if cx == x1 && cy == y1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; cx += sx; }
+        if e2 <= dx { err += dx; cy += sy; }
+    }
+}
+
 /// Render field + color bar into a pre-allocated RGBA buffer.
 /// The buffer is resized and zeroed as needed.
-pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap) {
+pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap, show_arrows: bool) {
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let frame_width = cfg.frame_width;
@@ -451,6 +481,78 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
     };
     font::draw_text(buf, frame_width, type_label_x, type_label_y, type_label, [0xAA, 0xAA, 0xAA]);
 
+    // --- Arrow overlay (quiver plot) ---
+    if show_arrows {
+        let sx = cfg.scale_x();
+        let sy = cfg.scale_y();
+        let stride = 6usize; // sample every 6 sim cells
+        let arrow_color = [160.0, 220.0, 255.0]; // light cyan
+        let arrow_alpha = 0.7;
+
+        // Find max velocity magnitude for normalization
+        let mut vmax_sq = 0.0_f64;
+        for j in (stride / 2..N).step_by(stride) {
+            for i in (stride / 2..nx).step_by(stride) {
+                let ii = idx(i as i32, j as i32, nx);
+                let vx_val = snap.vx[ii];
+                let vy_val = snap.vy[ii];
+                vmax_sq = vmax_sq.max(vx_val * vx_val + vy_val * vy_val);
+            }
+        }
+        let vmax = vmax_sq.sqrt();
+
+        if vmax > 1e-12 {
+            let max_arrow_px = stride as f64 * sx.min(sy) * 0.8;
+
+            for j in (stride / 2..N).step_by(stride) {
+                for i in (stride / 2..nx).step_by(stride) {
+                    let ii = idx(i as i32, j as i32, nx);
+                    let vx_val = snap.vx[ii];
+                    let vy_val = snap.vy[ii];
+                    let mag = (vx_val * vx_val + vy_val * vy_val).sqrt();
+
+                    // Skip near-zero velocity
+                    if mag < vmax * 0.01 { continue; }
+
+                    let scale = (mag / vmax) * max_arrow_px;
+                    let dx = vx_val / mag * scale;
+                    // Y is flipped for screen coords
+                    let dy = -vy_val / mag * scale;
+
+                    for tile in 0..tiles {
+                        let base_x = (i as f64 + tile as f64 * nx as f64) * sx;
+                        let base_y = ((N - 1) as f64 - j as f64) * sy;
+
+                        let x0 = (base_x - dx * 0.5) as isize;
+                        let y0 = (base_y - dy * 0.5) as isize;
+                        let x1 = (base_x + dx * 0.5) as isize;
+                        let y1 = (base_y + dy * 0.5) as isize;
+
+                        // Draw shaft
+                        draw_line_blended(buf, frame_width, x0, y0, x1, y1, dw, dh, x_off, arrow_color, arrow_alpha, screen_blend);
+
+                        // Draw arrowhead (two lines from tip at ±150° from direction)
+                        if scale > 2.0 {
+                            let head_len = 3.0_f64.min(scale * 0.35);
+                            let dir_x = dx / scale;
+                            let dir_y = dy / scale;
+                            // ±150° rotation (cos150 ≈ -0.866, sin150 ≈ 0.5)
+                            let cos_a = -0.866_f64;
+                            let sin_a = 0.5_f64;
+                            for &sign in &[1.0_f64, -1.0] {
+                                let hx = (dir_x * cos_a - dir_y * sin_a * sign) * head_len;
+                                let hy = (dir_x * sin_a * sign + dir_y * cos_a) * head_len;
+                                let hx1 = (x1 as f64 + hx) as isize;
+                                let hy1 = (y1 as f64 + hy) as isize;
+                                draw_line_blended(buf, frame_width, x1, y1, hx1, hy1, dw, dh, x_off, arrow_color, arrow_alpha, screen_blend);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Draw particles as glowing trails with meteor color palette.
     let sx = cfg.scale_x();
     let sy = cfg.scale_y();
@@ -565,7 +667,7 @@ pub fn render_into(buf: &mut Vec<u8>, snap: &FrameSnapshot, cfg: &RenderConfig, 
 #[cfg(any(test, debug_assertions))]
 pub fn render(snap: &FrameSnapshot, cfg: &RenderConfig, viz_mode: VizMode, colormap: ColorMap) -> Vec<u8> {
     let mut buf = Vec::new();
-    render_into(&mut buf, snap, cfg, viz_mode, colormap);
+    render_into(&mut buf, snap, cfg, viz_mode, colormap, false);
     buf
 }
 
@@ -922,6 +1024,53 @@ mod tests {
         let oldest_lum = sample_lum(oldest_x, oldest_y);
         assert!(newest_lum > oldest_lum + 5.0,
             "Newest trail should be brighter than oldest: newest={newest_lum:.1}, oldest={oldest_lum:.1}");
+    }
+
+    #[test]
+    fn test_draw_arrow_pixels() {
+        // Arrow overlay should draw non-zero pixels on a black buffer
+        let mut state = SimState::new(0, 0.15, N);
+        // Set uniform velocity so arrows appear
+        for v in state.vx.iter_mut() { *v = 1.0; }
+        for v in state.vy.iter_mut() { *v = 0.5; }
+        let snap = state.snapshot();
+        let cfg = test_config();
+        let mut buf = Vec::new();
+        render_into(&mut buf, &snap, &cfg, VizMode::None, ColorMap::TokyoNight, true);
+
+        // Count non-black pixels in display area (excluding status bar / color bar)
+        let dw = cfg.display_width;
+        let dh = cfg.display_height;
+        let mut lit = 0;
+        for y in 0..dh {
+            for x in 0..dw {
+                let off = (y * cfg.frame_width + x) * 4;
+                if buf[off] > 0 || buf[off + 1] > 0 || buf[off + 2] > 0 {
+                    lit += 1;
+                }
+            }
+        }
+        assert!(lit > 10, "Arrow overlay should draw visible pixels, got {lit}");
+    }
+
+    #[test]
+    fn test_arrows_overlay_modifies_buffer() {
+        // Rendering with show_arrows=true should differ from show_arrows=false
+        let mut state = SimState::new(0, 0.15, N);
+        for v in state.vx.iter_mut() { *v = 1.0; }
+        for v in state.vy.iter_mut() { *v = 0.5; }
+        let snap = state.snapshot();
+        let cfg = test_config();
+
+        let mut buf_off = Vec::new();
+        render_into(&mut buf_off, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, false);
+        let mut buf_on = Vec::new();
+        render_into(&mut buf_on, &snap, &cfg, VizMode::Field, ColorMap::TokyoNight, true);
+
+        let diffs: usize = buf_off.iter().zip(buf_on.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(diffs > 0, "Arrow overlay should modify buffer pixels");
     }
 
     #[test]

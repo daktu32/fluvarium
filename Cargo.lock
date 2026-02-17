@@ -187,6 +187,8 @@ dependencies = [
  "ctrlc",
  "minifb",
  "png",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

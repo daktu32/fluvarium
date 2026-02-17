@@ -9,6 +9,8 @@ pub enum ColorMap {
     SolarWind,
     /// Arctic Ice: deep void -> teal -> cyan -> white -> bright mint (for Cavity).
     ArcticIce,
+    /// Blue-White-Red: diverging colormap for signed data (vorticity etc).
+    BlueWhiteRed,
 }
 
 /// Tokyo Night-inspired color stops for field mapping.
@@ -52,6 +54,16 @@ pub(crate) const ARCTIC_ICE_STOPS: [(f64, f64, f64); 5] = [
     (120.0, 255.0, 200.0),// bright mint             (1.00)
 ];
 
+/// Blue-White-Red diverging colormap: deep blue -> blue -> white -> red -> deep red.
+/// Designed for signed data like vorticity: blue=negative, white=zero, red=positive.
+pub(crate) const BLUE_WHITE_RED_STOPS: [(f64, f64, f64); 5] = [
+    (10.0, 30.0, 150.0),  // deep blue              (0.00)
+    (80.0, 130.0, 230.0), // medium blue            (0.25)
+    (245.0, 245.0, 245.0),// near white             (0.50)
+    (230.0, 100.0, 70.0), // medium red             (0.75)
+    (150.0, 20.0, 20.0),  // deep red               (1.00)
+];
+
 /// Convert temperature [0.0, 1.0] to RGBA color (Tokyo Night palette).
 #[cfg(test)]
 pub fn temperature_to_rgba(t: f64) -> [u8; 4] {
@@ -65,6 +77,7 @@ pub fn map_to_rgba(t: f64, colormap: ColorMap) -> [u8; 4] {
         ColorMap::OceanLava => &OCEAN_LAVA_STOPS,
         ColorMap::SolarWind => &SOLAR_WIND_STOPS,
         ColorMap::ArcticIce => &ARCTIC_ICE_STOPS,
+        ColorMap::BlueWhiteRed => &BLUE_WHITE_RED_STOPS,
     };
 
     let t = t.clamp(0.0, 1.0);
