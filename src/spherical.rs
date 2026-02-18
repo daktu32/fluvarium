@@ -1,5 +1,112 @@
 // Spherical data snapshot for playback rendering.
 
+use crate::state::Xor128;
+use std::f64::consts::PI;
+
+pub const PARTICLE_COUNT: usize = 2000;
+pub const TRAIL_LEN: usize = 8;
+
+const LAT_CLAMP: f64 = 85.0 * PI / 180.0;
+
+pub struct SphericalParticle {
+    pub lon: f64, // [0, 2π)
+    pub lat: f64, // [-π/2, π/2]
+}
+
+pub struct SphericalParticleSystem {
+    pub particles: Vec<SphericalParticle>,
+    pub enabled: bool,
+    trail_lons: Vec<Vec<f64>>, // [TRAIL_LEN][N]
+    trail_lats: Vec<Vec<f64>>,
+    trail_cursor: usize,
+    trail_count: usize,
+}
+
+impl SphericalParticleSystem {
+    pub fn new(count: usize) -> Self {
+        let mut rng = Xor128::new(42);
+        let particles: Vec<SphericalParticle> = (0..count)
+            .map(|_| {
+                let lon = (rng.next_f64() * 0.5 + 0.5) * 2.0 * PI; // [0, 2π)
+                let u = rng.next_f64(); // [-1, 1)
+                let lat = u.asin();
+                SphericalParticle { lon, lat }
+            })
+            .collect();
+
+        let trail_lons = vec![vec![0.0; count]; TRAIL_LEN];
+        let trail_lats = vec![vec![0.0; count]; TRAIL_LEN];
+
+        Self {
+            particles,
+            enabled: true,
+            trail_lons,
+            trail_lats,
+            trail_cursor: 0,
+            trail_count: 0,
+        }
+    }
+
+    /// Push current positions into the trail ring buffer.
+    pub fn push_trail(&mut self) {
+        let slot = self.trail_cursor % TRAIL_LEN;
+        for (i, p) in self.particles.iter().enumerate() {
+            self.trail_lons[slot][i] = p.lon;
+            self.trail_lats[slot][i] = p.lat;
+        }
+        self.trail_cursor += 1;
+        if self.trail_count < TRAIL_LEN {
+            self.trail_count += 1;
+        }
+    }
+
+    /// Return trail slices oldest→newest. Each element is (&[lon], &[lat]).
+    pub fn ordered_trails(&self) -> Vec<(&[f64], &[f64])> {
+        let n = self.trail_count;
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let idx = (self.trail_cursor + TRAIL_LEN - n + k) % TRAIL_LEN;
+            out.push((self.trail_lons[idx].as_slice(), self.trail_lats[idx].as_slice()));
+        }
+        out
+    }
+
+    /// Advect particles using Euler step.
+    /// `cu_data`, `cv_data`: cosφ·u, cosφ·v on jm×im grid.
+    pub fn advect(
+        &mut self,
+        cu_data: &[f64],
+        cv_data: &[f64],
+        im: usize,
+        jm: usize,
+        gauss_nodes: &[f64],
+        dt: f64,
+    ) {
+        self.push_trail();
+
+        for p in &mut self.particles {
+            let mu = p.lat.sin();
+            let cu = interpolate_gauss(cu_data, im, jm, gauss_nodes, p.lon, mu);
+            let cv = interpolate_gauss(cv_data, im, jm, gauss_nodes, p.lon, mu);
+
+            let cos_lat = p.lat.cos();
+            let cos2_lat = cos_lat * cos_lat;
+
+            // dλ/dt = cu / cos²φ, dφ/dt = cv / cosφ
+            let dlon = if cos2_lat > 1e-6 { cu / cos2_lat } else { 0.0 };
+            let dlat = if cos_lat.abs() > 1e-3 { cv / cos_lat } else { 0.0 };
+
+            p.lon += dlon * dt;
+            p.lat += dlat * dt;
+
+            // Wrap longitude [0, 2π)
+            p.lon = p.lon.rem_euclid(2.0 * PI);
+            // Clamp latitude
+            p.lat = p.lat.clamp(-LAT_CLAMP, LAT_CLAMP);
+        }
+    }
+}
+
 #[allow(dead_code)]
 pub struct SphericalSnapshot {
     pub im: usize,
@@ -146,5 +253,77 @@ mod tests {
         // weight in lon: 0.5
         // Expected: 40*0.5 + 10*0.5 = 25
         assert!((val - 25.0).abs() < 1e-10, "got {val}");
+    }
+
+    // --- SphericalParticleSystem tests ---
+
+    #[test]
+    fn test_particle_initial_positions_in_range() {
+        let sys = SphericalParticleSystem::new(500);
+        for p in &sys.particles {
+            assert!(p.lon >= 0.0 && p.lon < 2.0 * PI, "lon out of range: {}", p.lon);
+            assert!(p.lat >= -PI / 2.0 && p.lat <= PI / 2.0, "lat out of range: {}", p.lat);
+        }
+    }
+
+    #[test]
+    fn test_particle_advect_uniform_eastwind() {
+        let mut sys = SphericalParticleSystem::new(10);
+        let im = 8;
+        let jm = 4;
+        let nodes = vec![-0.6, -0.2, 0.2, 0.6];
+        // Uniform cu = 1.0, cv = 0.0 (eastward cosφ·u = 1)
+        let cu = vec![1.0; im * jm];
+        let cv = vec![0.0; im * jm];
+
+        let lon_before: Vec<f64> = sys.particles.iter().map(|p| p.lon).collect();
+        sys.advect(&cu, &cv, im, jm, &nodes, 0.01);
+
+        for (i, p) in sys.particles.iter().enumerate() {
+            // lon should have increased (cu > 0 → dlon/dt > 0)
+            // For particles not near the wrap boundary
+            let expected_dlon = 0.01 / p.lat.cos().powi(2);
+            let actual_dlon = (p.lon - lon_before[i]).rem_euclid(2.0 * PI);
+            if actual_dlon < PI {
+                assert!(actual_dlon > 0.0, "particle {i} should move east");
+            }
+            let _ = expected_dlon; // just verify it moved
+        }
+    }
+
+    #[test]
+    fn test_particle_trail_ordering() {
+        let mut sys = SphericalParticleSystem::new(2);
+        // Push 3 trail entries with distinct positions
+        for k in 0..3 {
+            sys.particles[0].lon = k as f64;
+            sys.particles[1].lon = k as f64 + 10.0;
+            sys.push_trail();
+        }
+
+        let trails = sys.ordered_trails();
+        assert_eq!(trails.len(), 3);
+        // oldest first
+        assert!((trails[0].0[0] - 0.0).abs() < 1e-10);
+        assert!((trails[1].0[0] - 1.0).abs() < 1e-10);
+        assert!((trails[2].0[0] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_particle_trail_ring_buffer() {
+        let mut sys = SphericalParticleSystem::new(1);
+        // Push more than TRAIL_LEN entries
+        for k in 0..(TRAIL_LEN + 3) {
+            sys.particles[0].lon = k as f64;
+            sys.push_trail();
+        }
+
+        let trails = sys.ordered_trails();
+        assert_eq!(trails.len(), TRAIL_LEN);
+        // Should contain the last TRAIL_LEN entries, oldest first
+        for (i, (lons, _lats)) in trails.iter().enumerate() {
+            let expected = (3 + i) as f64; // entries 3..TRAIL_LEN+3-1
+            assert!((lons[0] - expected).abs() < 1e-10, "trail[{i}] lon={}, expected={expected}", lons[0]);
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 use super::color;
 use super::font;
-use crate::spherical::{interpolate_gauss, SphericalSnapshot};
+use crate::spherical::{interpolate_gauss, SphericalParticleSystem, SphericalSnapshot};
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,6 +257,90 @@ fn draw_text_shadow(buf: &mut [u8], fw: usize, x: usize, y: usize, text: &str, c
     font::draw_text(buf, fw, x, y, text, color);
 }
 
+/// Draw sized text with dark shadow for readability.
+fn draw_text_shadow_sized(buf: &mut [u8], fw: usize, x: usize, y: usize, text: &str, color: [u8; 3], cw: usize, ch: usize) {
+    font::draw_text_sized(buf, fw, x + 1, y + 1, text, [0, 0, 0], cw, ch);
+    font::draw_text_sized(buf, fw, x, y, text, color, cw, ch);
+}
+
+/// Render a field-name badge at the top-left of the display area.
+///
+/// Layout:
+/// ```text
+///   ┌────────────────────────┐
+///   │  vort anomaly     1/6  │
+///   └────────────────────────┘
+/// ```
+pub fn render_field_badge(
+    buf: &mut [u8],
+    cfg: &SphericalRenderConfig,
+    field_name: &str,
+    field_index: usize,
+    field_count: usize,
+) {
+    let fw = cfg.frame_width;
+    let display_name = field_display_name(field_name);
+
+    // Badge font sizes
+    let big_cw: usize = 8;
+    let big_ch: usize = 11;
+    let big_step = big_cw + big_cw / 5 + 1; // matches draw_text_sized spacing
+    let small_step = font::FONT_WIDTH + 1;
+
+    // Index text: "1/6"
+    let index_text = format!("{}/{}", field_index + 1, field_count);
+
+    // Compute badge dimensions
+    let name_w = display_name.len() * big_step;
+    let idx_w = index_text.len() * small_step;
+    let gap = big_step; // gap between name and index
+    let pad_x: usize = 8;
+    let pad_y: usize = 5;
+
+    let content_w = name_w + gap + idx_w;
+    let badge_w = pad_x * 2 + content_w;
+    let badge_h = pad_y * 2 + big_ch;
+
+    let margin: usize = 10;
+    let badge_x = margin;
+    let badge_y = margin;
+
+    // Draw semi-transparent dark background (70% alpha blend)
+    let bg_r = 10.0_f64;
+    let bg_g = 12.0;
+    let bg_b = 20.0;
+    let alpha = 0.7;
+
+    for y in badge_y..badge_y + badge_h {
+        for x in badge_x..badge_x + badge_w {
+            if x >= fw || y >= cfg.display_height {
+                continue;
+            }
+            let off = (y * fw + x) * 4;
+            if off + 3 < buf.len() {
+                let r = buf[off] as f64;
+                let g = buf[off + 1] as f64;
+                let b = buf[off + 2] as f64;
+                buf[off] = (r * (1.0 - alpha) + bg_r * alpha) as u8;
+                buf[off + 1] = (g * (1.0 - alpha) + bg_g * alpha) as u8;
+                buf[off + 2] = (b * (1.0 - alpha) + bg_b * alpha) as u8;
+            }
+        }
+    }
+
+    // Draw field display name (8x11 sized font with shadow)
+    let text_x = badge_x + pad_x;
+    let text_y = badge_y + pad_y;
+    let name_color = [0xCC, 0xCC, 0xD0];
+    draw_text_shadow_sized(buf, fw, text_x, text_y, display_name, name_color, big_cw, big_ch);
+
+    // Draw index "1/6" (5x7 normal font, dimmer)
+    let idx_x = text_x + name_w + gap;
+    let idx_y = text_y + (big_ch.saturating_sub(font::FONT_HEIGHT)) / 2; // vertically center
+    let idx_color = [0x55, 0x55, 0x55];
+    font::draw_text(buf, fw, idx_x, idx_y, &index_text, idx_color);
+}
+
 /// Draw graticule (lat/lon grid lines + labels) on equirectangular projection.
 fn draw_graticule_equirect(buf: &mut [u8], cfg: &SphericalRenderConfig) {
     let dw = cfg.display_width;
@@ -347,6 +431,20 @@ fn draw_graticule_equirect(buf: &mut [u8], cfg: &SphericalRenderConfig) {
     }
 }
 
+/// Map internal field names to human-readable display names.
+pub fn field_display_name(raw: &str) -> &str {
+    match raw {
+        "dvort" => "vort anomaly",
+        "dphi" => "height anomaly",
+        "vort" => "vorticity",
+        "phi" => "geopotential",
+        "topo" => "topography",
+        "u_cos" => "zonal wind",
+        "v_cos" => "merid. wind",
+        other => other,
+    }
+}
+
 fn data_range(data: &[f64]) -> (f64, f64) {
     let mut vmin = f64::INFINITY;
     let mut vmax = f64::NEG_INFINITY;
@@ -373,6 +471,14 @@ fn data_range(data: &[f64]) -> (f64, f64) {
         let abs_max = vmin.abs().max(vmax.abs());
         vmin = -abs_max;
         vmax = abs_max;
+    }
+    // Pad range for fields with small variation relative to their mean
+    let mean = (vmin + vmax) * 0.5;
+    let current_range = vmax - vmin;
+    let min_range = mean.abs() * 0.01;
+    if current_range < min_range && mean.abs() > 1e-10 {
+        vmin = mean - min_range * 0.5;
+        vmax = mean + min_range * 0.5;
     }
     (vmin, vmax)
 }
@@ -440,15 +546,210 @@ fn render_color_bar(
         font::draw_text(buf, fw, label_x, label_y, &label, label_color);
     }
 
-    // Field name label
+    // Field name label (use display name)
+    let display_name = field_display_name(field_name);
     let name_y = 2.min(dh.saturating_sub(font::FONT_HEIGHT));
-    let name_w = field_name.len() * (font::FONT_WIDTH + 1);
-    let name_x = if bar_x + bar_width / 2 >= name_w / 2 {
-        bar_x + bar_width / 2 - name_w / 2
+    let char_step = font::FONT_WIDTH + 1;
+    let name_w = display_name.len() * char_step;
+    // Left-align at bar_x if name is wider than the bar
+    let name_x = if name_w <= bar_width {
+        // Center within bar
+        if bar_x + bar_width / 2 >= name_w / 2 {
+            bar_x + bar_width / 2 - name_w / 2
+        } else {
+            bar_x
+        }
     } else {
         bar_x
     };
-    font::draw_text(buf, fw, name_x, name_y, field_name, [0xAA, 0xAA, 0xAA]);
+    font::draw_text(buf, fw, name_x, name_y, display_name, [0xAA, 0xAA, 0xAA]);
+}
+
+// --- Particle rendering helpers (local copies from renderer/mod.rs) ---
+
+const METEOR_COLORS: [[f64; 3]; 4] = [
+    [255.0, 240.0, 200.0], // warm white (newest)
+    [180.0, 220.0, 255.0], // light cyan
+    [80.0, 140.0, 255.0],  // blue
+    [30.0, 50.0, 120.0],   // deep blue (oldest)
+];
+
+fn meteor_color(t: f64) -> [f64; 3] {
+    let t = t.clamp(0.0, 1.0);
+    let seg = t * (METEOR_COLORS.len() - 1) as f64;
+    let i = (seg as usize).min(METEOR_COLORS.len() - 2);
+    let f = seg - i as f64;
+    let c0 = &METEOR_COLORS[METEOR_COLORS.len() - 1 - i];
+    let c1 = &METEOR_COLORS[(METEOR_COLORS.len() - 2).saturating_sub(i)];
+    [
+        c0[0] + f * (c1[0] - c0[0]),
+        c0[1] + f * (c1[1] - c0[1]),
+        c0[2] + f * (c1[2] - c0[2]),
+    ]
+}
+
+#[inline]
+fn screen_blend(buf: &mut [u8], off: usize, r: f64, g: f64, b: f64, alpha: f64) {
+    let br = buf[off] as f64;
+    let bg = buf[off + 1] as f64;
+    let bb = buf[off + 2] as f64;
+    let fr = (r * alpha).min(255.0);
+    let fg = (g * alpha).min(255.0);
+    let fb = (b * alpha).min(255.0);
+    buf[off] = (255.0 - (255.0 - br) * (255.0 - fr) / 255.0) as u8;
+    buf[off + 1] = (255.0 - (255.0 - bg) * (255.0 - fg) / 255.0) as u8;
+    buf[off + 2] = (255.0 - (255.0 - bb) * (255.0 - fb) / 255.0) as u8;
+}
+
+const GLOW_3X3: &[(isize, isize, f64)] = &[
+                  (0, -1, 0.5),
+    (-1, 0, 0.5), (0,  0, 1.0), (1, 0, 0.5),
+                  (0,  1, 0.5),
+];
+
+/// Render particles on equirectangular projection.
+pub fn render_particles_equirect(
+    buf: &mut [u8],
+    ps: &SphericalParticleSystem,
+    cfg: &SphericalRenderConfig,
+) {
+    let dw = cfg.display_width;
+    let dh = cfg.display_height;
+    let fw = cfg.frame_width;
+
+    // Draw trails (oldest → newest)
+    let trails = ps.ordered_trails();
+    let n_trails = trails.len();
+    for (ti, (lons, lats)) in trails.iter().enumerate() {
+        let frac = if n_trails > 1 {
+            ti as f64 / (n_trails - 1) as f64
+        } else {
+            1.0
+        };
+        let color = meteor_color(frac);
+        let alpha = 0.15 + 0.35 * frac;
+
+        for i in 0..lons.len() {
+            let sx = (lons[i] / (2.0 * PI) * dw as f64) as isize;
+            let sy = ((PI / 2.0 - lats[i]) / PI * dh as f64) as isize;
+            if sx >= 0 && sx < dw as isize && sy >= 0 && sy < dh as isize {
+                let off = (sy as usize * fw + sx as usize) * 4;
+                if off + 3 < buf.len() {
+                    screen_blend(buf, off, color[0], color[1], color[2], alpha);
+                }
+            }
+        }
+    }
+
+    // Draw particle heads with 3x3 soft glow
+    let head_color = [255.0, 240.0, 210.0];
+    for p in &ps.particles {
+        let sx = (p.lon / (2.0 * PI) * dw as f64) as isize;
+        let sy = ((PI / 2.0 - p.lat) / PI * dh as f64) as isize;
+
+        for &(dx, dy, weight) in GLOW_3X3 {
+            let px = sx + dx;
+            let py = sy + dy;
+            if px >= 0 && px < dw as isize && py >= 0 && py < dh as isize {
+                let off = (py as usize * fw + px as usize) * 4;
+                if off + 3 < buf.len() {
+                    screen_blend(buf, off, head_color[0], head_color[1], head_color[2], weight * 0.8);
+                }
+            }
+        }
+    }
+}
+
+/// Render particles on orthographic projection.
+pub fn render_particles_ortho(
+    buf: &mut [u8],
+    ps: &SphericalParticleSystem,
+    cfg: &SphericalRenderConfig,
+    cam_lat: f64,
+    cam_lon: f64,
+) {
+    let dw = cfg.display_width;
+    let dh = cfg.display_height;
+    let fw = cfg.frame_width;
+    let radius = (dw.min(dh) as f64) * 0.45;
+    let cx = dw as f64 / 2.0;
+    let cy = dh as f64 / 2.0;
+
+    let sin_clat = cam_lat.sin();
+    let cos_clat = cam_lat.cos();
+    let sin_clon = cam_lon.sin();
+    let cos_clon = cam_lon.cos();
+
+    // Project (lon, lat) → screen, returning None if on back side
+    let project = |lon: f64, lat: f64| -> Option<(isize, isize, f64)> {
+        let cos_lat = lat.cos();
+        let sin_lat = lat.sin();
+        let x = cos_lat * lon.sin();
+        let y = sin_lat;
+        let z = cos_lat * lon.cos();
+
+        // Camera rotation: world → view
+        let rx = x * cos_clon + z * sin_clon;
+        let rz = -x * sin_clon + z * cos_clon;
+        let nx = rx;
+        let ny = y * cos_clat - rz * sin_clat;
+        let nz = y * sin_clat + rz * cos_clat;
+
+        if nz < 0.0 {
+            return None; // back side
+        }
+
+        let screen_x = (cx + nx * radius) as isize;
+        let screen_y = (cy - ny * radius) as isize;
+        Some((screen_x, screen_y, nz))
+    };
+
+    // Draw trails
+    let trails = ps.ordered_trails();
+    let n_trails = trails.len();
+    for (ti, (lons, lats)) in trails.iter().enumerate() {
+        let frac = if n_trails > 1 {
+            ti as f64 / (n_trails - 1) as f64
+        } else {
+            1.0
+        };
+        let color = meteor_color(frac);
+        let alpha = 0.15 + 0.35 * frac;
+
+        for i in 0..lons.len() {
+            if let Some((sx, sy, nz)) = project(lons[i], lats[i]) {
+                if sx >= 0 && sx < dw as isize && sy >= 0 && sy < dh as isize {
+                    let limb = nz.powf(0.3);
+                    let off = (sy as usize * fw + sx as usize) * 4;
+                    if off + 3 < buf.len() {
+                        screen_blend(buf, off, color[0] * limb, color[1] * limb, color[2] * limb, alpha);
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw heads
+    let head_color = [255.0, 240.0, 210.0];
+    for p in &ps.particles {
+        if let Some((sx, sy, nz)) = project(p.lon, p.lat) {
+            let limb = nz.powf(0.3);
+            for &(dx, dy, weight) in GLOW_3X3 {
+                let px = sx + dx;
+                let py = sy + dy;
+                if px >= 0 && px < dw as isize && py >= 0 && py < dh as isize {
+                    let off = (py as usize * fw + px as usize) * 4;
+                    if off + 3 < buf.len() {
+                        screen_blend(
+                            buf, off,
+                            head_color[0] * limb, head_color[1] * limb, head_color[2] * limb,
+                            weight * 0.8,
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn format_value(v: f64) -> String {

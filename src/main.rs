@@ -1070,6 +1070,7 @@ fn run_headless() {
 fn run_gui_playback(dir: &str) {
     use renderer::spherical::{
         Projection, SphericalRenderConfig, render_equirectangular, render_orthographic,
+        render_particles_equirect, render_particles_ortho, render_field_badge,
     };
 
     eprintln!("Loading {dir}...");
@@ -1218,6 +1219,11 @@ fn run_gui_playback(dir: &str) {
             needs_redraw = true;
         }
 
+        if window.is_key_pressed(Key::T, KeyRepeat::No) {
+            pb.toggle_particles();
+            needs_redraw = true;
+        }
+
         // Advance playback
         let prev_frame = pb.current_frame;
         pb.tick(dt);
@@ -1236,15 +1242,31 @@ fn run_gui_playback(dir: &str) {
                     let cfg = SphericalRenderConfig::equirectangular(cur_w, cur_h);
                     render_equirectangular(&mut rgba_buf, &snap, gauss, &cfg, colormap);
 
+                    // Particle overlay
+                    if let Some(ref ps) = pb.particles {
+                        if ps.enabled {
+                            render_particles_equirect(&mut rgba_buf, ps, &cfg);
+                        }
+                    }
+
+                    // Field badge
+                    render_field_badge(
+                        &mut rgba_buf, &cfg,
+                        &snap.field_name, snap.field_index, snap.field_names.len(),
+                    );
+
                     // Status bar
+                    let particle_status = if pb.has_particles() {
+                        if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
+                    } else { "" };
                     let status = format!(
-                        "frame {}/{} t={:.3} [{}] x{:.1} | {}",
+                        "frame {}/{} t={:.3} x{:.1} {}{}",
                         pb.current_frame,
                         pb.frame_count(),
                         snap.time,
-                        snap.field_name,
                         pb.speed,
                         if pb.playing { ">" } else { "||" },
+                        particle_status,
                     );
                     renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
                         display_width: cfg.display_width,
@@ -1269,16 +1291,32 @@ fn run_gui_playback(dir: &str) {
                         &mut rgba_buf, &snap, gauss, &cfg, colormap, cam_lat, cam_lon,
                     );
 
+                    // Particle overlay
+                    if let Some(ref ps) = pb.particles {
+                        if ps.enabled {
+                            render_particles_ortho(&mut rgba_buf, ps, &cfg, cam_lat, cam_lon);
+                        }
+                    }
+
+                    // Field badge
+                    render_field_badge(
+                        &mut rgba_buf, &cfg,
+                        &snap.field_name, snap.field_index, snap.field_names.len(),
+                    );
+
+                    let particle_status = if pb.has_particles() {
+                        if pb.particles_enabled() { " [T:particles]" } else { " [T:off]" }
+                    } else { "" };
                     let status = format!(
-                        "frame {}/{} t={:.3} [{}] x{:.1} | {} | lat={:.0} lon={:.0}",
+                        "frame {}/{} t={:.3} x{:.1} {} lat={:.0} lon={:.0}{}",
                         pb.current_frame,
                         pb.frame_count(),
                         snap.time,
-                        snap.field_name,
                         pb.speed,
                         if pb.playing { ">" } else { "||" },
                         cam_lat.to_degrees(),
                         cam_lon.to_degrees(),
+                        particle_status,
                     );
                     renderer::render_status(&mut rgba_buf, &renderer::RenderConfig {
                         display_width: cfg.display_width,
