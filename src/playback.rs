@@ -1,7 +1,8 @@
-// Playback controller for spmodel-rs .spg output.
+// Playback controller for spmodel-rs .spg and .nc output.
 
 use crate::spherical::SphericalSnapshot;
 use crate::spgrid::{SpgFrame, SpgReader};
+use gtool_rs::reader::GtoolReader;
 
 pub struct PlaybackState {
     frames: Vec<SpgFrame>,
@@ -40,6 +41,40 @@ impl PlaybackState {
             speed: 1.0,
             accumulator: 0.0,
             model_name: reader.manifest.model.clone(),
+        })
+    }
+
+    pub fn from_netcdf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let reader = GtoolReader::open(path)?;
+        let info = reader.file_info();
+        let frames = reader.read_all_frames()?;
+
+        // Read gauss nodes directly from the NetCDF file (no computation needed)
+        let gauss_nodes = reader
+            .gauss_nodes()
+            .unwrap_or_else(|| gtool_rs::coord::gauss_nodes(info.grid.jm));
+
+        let spg_frames: Vec<SpgFrame> = frames
+            .into_iter()
+            .map(|f| SpgFrame {
+                step: f.step,
+                time: f.time,
+                fields: f.fields,
+            })
+            .collect();
+
+        Ok(Self {
+            frames: spg_frames,
+            gauss_nodes,
+            im: info.grid.im,
+            jm: info.grid.jm,
+            field_names: info.field_names.clone(),
+            field_index: 0,
+            current_frame: 0,
+            playing: true,
+            speed: 1.0,
+            accumulator: 0.0,
+            model_name: info.model.clone(),
         })
     }
 

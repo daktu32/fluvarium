@@ -1073,24 +1073,38 @@ fn run_gui_playback(dir: &str) {
     };
 
     eprintln!("Loading {dir}...");
-    let reader = spgrid::SpgReader::open(dir).unwrap_or_else(|e| {
-        eprintln!("Error opening {dir}: {e}");
-        std::process::exit(1);
-    });
-    eprintln!(
-        "  model={}, grid={}x{} T{}, {} frames, fields={:?}",
-        reader.manifest.model,
-        reader.manifest.grid.im,
-        reader.manifest.grid.jm,
-        reader.manifest.grid.nm,
-        reader.manifest.frames.len(),
-        reader.manifest.fields,
-    );
 
-    let mut pb = playback::PlaybackState::from_reader(&reader).unwrap_or_else(|e| {
-        eprintln!("Error reading frames: {e}");
-        std::process::exit(1);
-    });
+    let mut pb = if dir.ends_with(".nc") {
+        // NetCDF file: use GtoolReader
+        let pb = playback::PlaybackState::from_netcdf(dir).unwrap_or_else(|e| {
+            eprintln!("Error opening {dir}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!(
+            "  model={}, grid={}x{}, {} frames, fields={:?}",
+            pb.model_name, pb.im, pb.jm, pb.frame_count(), pb.field_names,
+        );
+        pb
+    } else {
+        // Legacy .spg directory: use SpgReader
+        let reader = spgrid::SpgReader::open(dir).unwrap_or_else(|e| {
+            eprintln!("Error opening {dir}: {e}");
+            std::process::exit(1);
+        });
+        eprintln!(
+            "  model={}, grid={}x{} T{}, {} frames, fields={:?}",
+            reader.manifest.model,
+            reader.manifest.grid.im,
+            reader.manifest.grid.jm,
+            reader.manifest.grid.nm,
+            reader.manifest.frames.len(),
+            reader.manifest.fields,
+        );
+        playback::PlaybackState::from_reader(&reader).unwrap_or_else(|e| {
+            eprintln!("Error reading frames: {e}");
+            std::process::exit(1);
+        })
+    };
     eprintln!("  {} frames loaded.", pb.frame_count());
 
     let win_width = Defaults::WIN_WIDTH;

@@ -11,6 +11,7 @@ categories = ["simulation", "visualization"]
 
 [dependencies]
 ctrlc = "3.4"
+gtool-rs = { path = "../dcmodel/gtool-rs" }
 minifb = "0.28.0"
 png = "0.17"
 base64 = "0.22"
