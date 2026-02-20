@@ -159,6 +159,12 @@ pub struct PlaybackState {
     psi_index: Option<usize>,
     /// Channel particle system (only for channel grids with psi field).
     pub channel_particles: Option<ChannelParticles>,
+    /// Index of "vort" field (for gyre center tracking).
+    vort_index: Option<usize>,
+    /// Pre-computed gyre center (lon, lat) in radians per frame.
+    gyre_centers: Vec<(f64, f64)>,
+    /// Whether to display the gyre trajectory track.
+    pub show_gyre_track: bool,
 }
 
 impl PlaybackState {
@@ -230,6 +236,11 @@ impl PlaybackState {
         let output_interval = reader.manifest.time.output_interval;
         let domain_length = reader.manifest.domain_length();
 
+        // Detect vort field and precompute gyre centers
+        let vort_index = field_names.iter().position(|n| n == "vort");
+        let gyre_centers = precompute_gyre_centers(&frames, vort_index, im, jm, &gauss_nodes);
+        let show_gyre_track = vort_index.is_some();
+
         Ok(Self {
             frames,
             gauss_nodes,
@@ -253,6 +264,9 @@ impl PlaybackState {
             channel_domain: (0.0, 0.0),
             psi_index: None,
             channel_particles: None,
+            vort_index,
+            gyre_centers,
+            show_gyre_track,
         })
     }
 
@@ -347,6 +361,31 @@ impl PlaybackState {
             None
         };
 
+        // Try to read pre-computed gyre centers from NC file
+        let gyre_from_nc = if !is_1d && !is_channel {
+            match (reader.read_scalar("gyre_lon"), reader.read_scalar("gyre_lat")) {
+                (Some(lons), Some(lats)) if lons.len() == spg_frames.len() => {
+                    Some(lons.into_iter().zip(lats).collect::<Vec<(f64, f64)>>())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let has_nc_gyre = gyre_from_nc.is_some();
+        let vort_index = if is_1d || is_channel {
+            None
+        } else {
+            field_names.iter().position(|n| n == "vort")
+        };
+        let gyre_centers = gyre_from_nc.unwrap_or_else(|| {
+            precompute_gyre_centers(&spg_frames, vort_index, im, jm, &gauss_nodes)
+        });
+        // Only auto-show when NC contains explicit gyre_lon/gyre_lat;
+        // for vort-only data, the track is available via G key but hidden by default.
+        let show_gyre_track = has_nc_gyre;
+
         Ok(Self {
             frames: spg_frames,
             gauss_nodes,
@@ -370,6 +409,9 @@ impl PlaybackState {
             channel_domain,
             psi_index,
             channel_particles,
+            vort_index,
+            gyre_centers,
+            show_gyre_track,
         })
     }
 
@@ -448,6 +490,22 @@ impl PlaybackState {
         if let Some(ref mut cp) = self.channel_particles {
             cp.enabled = !cp.enabled;
         }
+    }
+
+    pub fn toggle_gyre_track(&mut self) {
+        self.show_gyre_track = !self.show_gyre_track;
+    }
+
+    pub fn has_gyre_track(&self) -> bool {
+        self.vort_index.is_some()
+    }
+
+    pub fn gyre_track_up_to_current(&self) -> &[(f64, f64)] {
+        if self.gyre_centers.is_empty() {
+            return &[];
+        }
+        let end = (self.current_frame + 1).min(self.gyre_centers.len());
+        &self.gyre_centers[..end]
     }
 
     pub fn has_particles(&self) -> bool {
@@ -569,6 +627,92 @@ impl PlaybackState {
             global_range,
         }
     }
+}
+
+/// Find the center of the vorticity maximum (signed) in a single frame.
+/// Tracks the most positive vorticity value (counterclockwise vortex center).
+/// Returns (lon, lat) in radians with sub-grid parabolic interpolation.
+fn find_vort_center(vort: &[f64], im: usize, jm: usize, gauss_nodes: &[f64]) -> (f64, f64) {
+    use std::f64::consts::PI;
+
+    // Find grid cell with max vort (signed, not absolute)
+    let mut max_val = f64::NEG_INFINITY;
+    let mut max_i = 0;
+    let mut max_j = 0;
+    for j in 0..jm {
+        for i in 0..im {
+            let v = vort[j * im + i];
+            if v > max_val {
+                max_val = v;
+                max_i = i;
+                max_j = j;
+            }
+        }
+    }
+
+    // Parabolic sub-grid interpolation in i (periodic)
+    // Use signed values — parabolic fit finds the peak of the signed field
+    let i_left = (max_i + im - 1) % im;
+    let i_right = (max_i + 1) % im;
+    let f_l = vort[max_j * im + i_left];
+    let f_c = vort[max_j * im + max_i];
+    let f_r = vort[max_j * im + i_right];
+    let denom_i = f_l - 2.0 * f_c + f_r;
+    let delta_i = if denom_i.abs() > 1e-30 {
+        0.5 * (f_l - f_r) / denom_i
+    } else {
+        0.0
+    };
+    let i_sub = max_i as f64 + delta_i.clamp(-0.5, 0.5);
+    let lon = (i_sub / im as f64 * 2.0 * PI).rem_euclid(2.0 * PI);
+
+    // Parabolic sub-grid interpolation in j (gauss_nodes)
+    let mu = if max_j >= 1 && max_j < jm - 1 && !gauss_nodes.is_empty() {
+        let f_b = vort[(max_j - 1) * im + max_i];
+        let f_a = vort[(max_j + 1) * im + max_i];
+        let denom_j = f_b - 2.0 * f_c + f_a;
+        let delta_j = if denom_j.abs() > 1e-30 {
+            0.5 * (f_b - f_a) / denom_j
+        } else {
+            0.0
+        };
+        let j_sub = max_j as f64 + delta_j.clamp(-0.5, 0.5);
+        // Linearly interpolate gauss_nodes at fractional index
+        let j_lo = (j_sub.floor() as usize).min(jm - 1);
+        let j_hi = (j_lo + 1).min(jm - 1);
+        let frac = j_sub - j_lo as f64;
+        gauss_nodes[j_lo] * (1.0 - frac) + gauss_nodes[j_hi] * frac
+    } else if !gauss_nodes.is_empty() {
+        gauss_nodes[max_j.min(gauss_nodes.len() - 1)]
+    } else {
+        0.0
+    };
+
+    let lat = mu.clamp(-1.0, 1.0).asin();
+    (lon, lat)
+}
+
+/// Precompute gyre centers for all frames that have a vort field.
+fn precompute_gyre_centers(
+    frames: &[SpgFrame],
+    vort_index: Option<usize>,
+    im: usize,
+    jm: usize,
+    gauss_nodes: &[f64],
+) -> Vec<(f64, f64)> {
+    let Some(vi) = vort_index else {
+        return Vec::new();
+    };
+    frames
+        .iter()
+        .map(|frame| {
+            if vi < frame.fields.len() {
+                find_vort_center(&frame.fields[vi].1, im, jm, gauss_nodes)
+            } else {
+                (0.0, 0.0)
+            }
+        })
+        .collect()
 }
 
 /// Compute gauss nodes (μ = sinφ, ascending) via Newton iteration on Legendre polynomials.

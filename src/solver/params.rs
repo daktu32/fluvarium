@@ -23,6 +23,7 @@ pub struct SolverParams {
     pub shear_relax: f64,
     pub shear_thickness: f64,
     pub lid_velocity: f64,
+    pub benchmark_mode: bool,
 }
 
 impl Default for SolverParams {
@@ -39,14 +40,15 @@ impl Default for SolverParams {
             cool_rate: 8.0,
             bottom_base: 0.15,
             inflow_vel: 0.1,
-            cylinder_x: 21.0,
+            cylinder_x: N as f64 * 21.0 / 80.0,
             cylinder_y: (N / 2) as f64,
-            cylinder_radius: 8.0,
+            cylinder_radius: N as f64 * 0.1,
             confinement: 0.0,
             shear_velocity: 0.0,
             shear_relax: 0.0,
-            shear_thickness: 3.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            benchmark_mode: false,
         }
     }
 }
@@ -66,14 +68,15 @@ impl SolverParams {
             cool_rate: 0.0,
             bottom_base: 0.0,
             inflow_vel: 0.1,
-            cylinder_x: 21.0,
+            cylinder_x: N as f64 * 21.0 / 80.0,
             cylinder_y: (N / 2) as f64,
-            cylinder_radius: 8.0,
+            cylinder_radius: N as f64 * 0.1,
             confinement: 3.0,
             shear_velocity: 0.0,
             shear_relax: 0.0,
-            shear_thickness: 3.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            benchmark_mode: false,
         }
     }
 
@@ -97,8 +100,9 @@ impl SolverParams {
             confinement: 0.0,
             shear_velocity: 0.08,
             shear_relax: 1.0,
-            shear_thickness: 3.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
             lid_velocity: 0.0,
+            benchmark_mode: false,
         }
     }
 
@@ -123,7 +127,39 @@ impl SolverParams {
             confinement: 0.0,
             shear_velocity: 0.0,
             shear_relax: 0.0,
-            shear_thickness: 3.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
+            benchmark_mode: false,
+        }
+    }
+
+    /// Construct parameters from Rayleigh and Prandtl numbers for benchmark mode.
+    /// Uses non-dimensionalization: diff = 1/sqrt(Ra*Pr), visc = Pr*diff, buoyancy = Ra*visc*diff.
+    /// Disables Gaussian heat source/cooling (uniform Dirichlet BCs).
+    pub fn from_ra_pr(ra: f64, pr: f64) -> Self {
+        let diff = 1.0 / (ra * pr).sqrt();
+        let visc = pr * diff;
+        let buoyancy = ra * visc * diff;
+        Self {
+            visc,
+            diff,
+            dt: 0.05,
+            diffuse_iter: 20,
+            project_iter: 30,
+            heat_buoyancy: buoyancy,
+            noise_amp: 0.0,
+            source_strength: 0.0,
+            cool_rate: 0.0,
+            bottom_base: 0.0,
+            inflow_vel: 0.0,
+            cylinder_x: 0.0,
+            cylinder_y: 0.0,
+            cylinder_radius: 0.0,
+            confinement: 0.0,
+            shear_velocity: 0.0,
+            shear_relax: 0.0,
+            shear_thickness: N as f64 * 3.0 / 80.0,
+            lid_velocity: 0.0,
+            benchmark_mode: true,
         }
     }
 }
@@ -140,9 +176,42 @@ mod tests {
         assert_eq!(params.visc, 0.015);
         assert_eq!(params.dt, 0.06);
         assert_eq!(params.confinement, 3.0);
-        assert_eq!(params.cylinder_x, 21.0);
+        assert_eq!(params.cylinder_x, N as f64 * 21.0 / 80.0);
         assert_eq!(params.cylinder_y, (N / 2) as f64);
-        assert_eq!(params.cylinder_radius, 8.0);
+        assert_eq!(params.cylinder_radius, N as f64 * 0.1);
+    }
+
+    #[test]
+    fn test_from_ra_pr_basic() {
+        let p = SolverParams::from_ra_pr(10000.0, 1.0);
+        // diff = 1/sqrt(10000*1) = 1/100 = 0.01
+        assert!((p.diff - 0.01).abs() < 1e-10, "diff={}", p.diff);
+        // visc = Pr * diff = 1 * 0.01 = 0.01
+        assert!((p.visc - 0.01).abs() < 1e-10, "visc={}", p.visc);
+        // buoyancy = Ra * visc * diff = 10000 * 0.01 * 0.01 = 1.0
+        assert!((p.heat_buoyancy - 1.0).abs() < 1e-10, "buoyancy={}", p.heat_buoyancy);
+        assert!(p.benchmark_mode);
+        assert_eq!(p.source_strength, 0.0);
+        assert_eq!(p.cool_rate, 0.0);
+    }
+
+    #[test]
+    fn test_from_ra_pr_high_pr() {
+        let p = SolverParams::from_ra_pr(10000.0, 7.0);
+        // diff = 1/sqrt(70000)
+        let expected_diff = 1.0 / (70000.0_f64).sqrt();
+        assert!((p.diff - expected_diff).abs() < 1e-10);
+        // visc = 7 * diff
+        assert!((p.visc - 7.0 * expected_diff).abs() < 1e-10);
+        assert!(p.benchmark_mode);
+    }
+
+    #[test]
+    fn test_default_benchmark_mode_false() {
+        assert!(!SolverParams::default().benchmark_mode);
+        assert!(!SolverParams::default_karman().benchmark_mode);
+        assert!(!SolverParams::default_kh().benchmark_mode);
+        assert!(!SolverParams::default_cavity().benchmark_mode);
     }
 
     #[test]

@@ -153,7 +153,7 @@ impl RenderConfig {
 
 /// Compute vorticity field from velocity.
 /// Returns (field, positive_max, negative_max) where both max values are >= 0.
-fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64, f64) {
+pub(crate) fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64, f64) {
     let mut omega = vec![0.0; nx * N];
     let mut pos_max = 0.0_f64;
     let mut neg_max = 0.0_f64;
@@ -174,7 +174,7 @@ fn compute_vorticity(vx: &[f64], vy: &[f64], nx: usize) -> (Vec<f64>, f64, f64) 
 /// Compute stream function psi from vx by integrating in y-direction.
 /// psi(x, 0) = 0, psi(x, y) = psi(x, y-1) + vx(x, y).
 /// Returns (psi_field, psi_min, psi_max).
-fn compute_stream_function(vx: &[f64], nx: usize) -> (Vec<f64>, f64, f64) {
+pub(crate) fn compute_stream_function(vx: &[f64], nx: usize) -> (Vec<f64>, f64, f64) {
     let mut psi = vec![0.0; nx * N];
     let mut psi_min = 0.0_f64;
     let mut psi_max = 0.0_f64;
@@ -732,8 +732,9 @@ mod tests {
     #[test]
     fn test_render_config_small_terminal() {
         let cfg = RenderConfig::fit(200, 50, 3, N);
-        assert_eq!(cfg.display_width, 200 - BAR_TOTAL); // 200 - 56 = 144
-        assert_eq!(cfg.display_height, N); // clamped to minimum N (50 < 80)
+        // Terminal too small: display_width clamped to sim_nx (=N)
+        assert_eq!(cfg.display_width, N);
+        assert_eq!(cfg.display_height, N); // clamped to minimum N
     }
 
     #[test]

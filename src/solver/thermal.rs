@@ -74,12 +74,62 @@ pub(super) fn apply_buoyancy(vy: &mut [f64], temperature: &[f64], buoyancy: f64,
     }
 }
 
+/// Apply buoyancy from perturbation temperature (deviation from conduction profile).
+/// vy += dt * buoyancy * (T - T_cond(y)), where T_cond = 1 - y/(N-1).
+/// Used in benchmark mode where uniform Dirichlet BCs would otherwise cause
+/// buoyancy to be absorbed by the pressure projection.
+pub(super) fn apply_buoyancy_perturbation(vy: &mut [f64], temperature: &[f64], buoyancy: f64, dt: f64, nx: usize) {
+    let n_minus_1 = (N - 1) as f64;
+    for j in 1..(N - 1) {
+        let t_cond = 1.0 - j as f64 / n_minus_1;
+        for i in 0..nx {
+            let ii = idx_inner(i, j, nx);
+            vy[ii] += dt * buoyancy * (temperature[ii] - t_cond);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::{idx, N};
 
     const BB: f64 = 0.15;
+
+    #[test]
+    fn test_perturbation_buoyancy_conduction_zero() {
+        // If temperature exactly matches conduction profile, no buoyancy is added
+        let mut vy = vec![0.0; N * N];
+        let mut temperature = vec![0.0; N * N];
+        for j in 0..N {
+            let t_cond = 1.0 - j as f64 / (N - 1) as f64;
+            for i in 0..N {
+                temperature[idx(i as i32, j as i32, N)] = t_cond;
+            }
+        }
+        apply_buoyancy_perturbation(&mut vy, &temperature, 10.0, 1.0, N);
+        let max_vy: f64 = vy.iter().map(|v| v.abs()).fold(0.0, f64::max);
+        assert!(max_vy < 1e-12, "Should have zero buoyancy at conduction profile, got {}", max_vy);
+    }
+
+    #[test]
+    fn test_perturbation_buoyancy_hot_anomaly() {
+        // Hot anomaly above conduction profile → positive vy (upward)
+        let mut vy = vec![0.0; N * N];
+        let mut temperature = vec![0.0; N * N];
+        let mid = N / 2;
+        for j in 0..N {
+            let t_cond = 1.0 - j as f64 / (N - 1) as f64;
+            for i in 0..N {
+                temperature[idx(i as i32, j as i32, N)] = t_cond;
+            }
+        }
+        // Add hot anomaly at midplane
+        temperature[idx((mid) as i32, mid as i32, N)] = 1.0; // much hotter than T_cond ~0.5
+        apply_buoyancy_perturbation(&mut vy, &temperature, 1.0, 1.0, N);
+        let vy_mid = vy[idx(mid as i32, mid as i32, N)];
+        assert!(vy_mid > 0.0, "Hot anomaly should push upward, got {}", vy_mid);
+    }
 
     #[test]
     fn test_buoyancy_creates_upward_velocity() {

@@ -1,6 +1,7 @@
 mod boundary;
 mod cavity;
 mod core;
+pub mod diagnostics;
 mod karman;
 mod kh;
 mod params;
@@ -13,13 +14,13 @@ pub use params::SolverParams;
 pub use thermal::inject_thermal_perturbation;
 
 use crate::state::N;
-use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, LidDrivenCavity, RayleighBenard};
+use boundary::BoundaryConfig::{KarmanVortex, KelvinHelmholtz, LidDrivenCavity, RayleighBenard, RayleighBenardBenchmark};
 use cavity::compute_velocity_dye;
 use core::{advect, diffuse, project};
 use karman::{apply_mask, apply_mask_fields, damp_dye_in_cylinder, inject_dye, inject_inflow, inject_wake_perturbation, vorticity_confinement};
 use kh::reinject_shear;
 use particle::{advect_particles, advect_particles_cavity, advect_particles_karman};
-use thermal::{apply_buoyancy, inject_heat_source};
+use thermal::{apply_buoyancy, apply_buoyancy_perturbation, inject_heat_source};
 
 /// Full fluid simulation step (Rayleigh-Benard).
 pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
@@ -76,6 +77,59 @@ pub fn fluid_step(state: &mut crate::state::SimState, params: &SolverParams) {
     }
 
     // Advect particles through the divergence-free velocity field
+    advect_particles(state, dt);
+}
+
+/// Full fluid simulation step for Rayleigh-Benard benchmark mode.
+/// Uses uniform Dirichlet BCs and perturbation buoyancy (no Gaussian heat source).
+pub fn fluid_step_benchmark(state: &mut crate::state::SimState, params: &SolverParams) {
+    let dt = params.dt;
+    let nx = state.nx;
+    let bc = RayleighBenardBenchmark;
+
+    // Diffuse velocity
+    diffuse(FieldType::Vx, &mut state.vx0, &state.vx, params.visc, dt, params.diffuse_iter, &bc, nx);
+    diffuse(FieldType::Vy, &mut state.vy0, &state.vy, params.visc, dt, params.diffuse_iter, &bc, nx);
+
+    // Project to make diffused velocity divergence-free
+    project(
+        &mut state.vx0,
+        &mut state.vy0,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
+        params.project_iter,
+        &bc,
+        nx,
+    );
+
+    // Advect velocity
+    advect(FieldType::Vx, &mut state.vx, &state.vx0, &state.vx0, &state.vy0, dt, &bc, nx);
+    advect(FieldType::Vy, &mut state.vy, &state.vy0, &state.vx0, &state.vy0, dt, &bc, nx);
+
+    // Diffuse + advect temperature
+    diffuse(FieldType::Temperature, &mut state.scratch_a, &state.temperature, params.diff, dt, params.diffuse_iter, &bc, nx);
+    advect(FieldType::Temperature, &mut state.temperature, &state.scratch_a, &state.vx, &state.vy, dt, &bc, nx);
+
+    // Perturbation buoyancy: vy += dt * B * (T - T_cond)
+    apply_buoyancy_perturbation(&mut state.vy, &state.temperature, params.heat_buoyancy, dt, nx);
+
+    // Project to make velocity divergence-free
+    project(
+        &mut state.vx,
+        &mut state.vy,
+        &mut state.scratch_a,
+        &mut state.scratch_b,
+        params.project_iter,
+        &bc,
+        nx,
+    );
+
+    // Clamp temperature to physical bounds [0, 1]
+    for t in state.temperature.iter_mut() {
+        *t = t.clamp(0.0, 1.0);
+    }
+
+    // Advect particles
     advect_particles(state, dt);
 }
 
@@ -497,6 +551,48 @@ mod tests {
         let avg = temps.iter().sum::<f64>() / N as f64;
         let variance = temps.iter().map(|t| (t - avg).powi(2)).sum::<f64>() / N as f64;
         assert!(variance > 1e-6, "Convection should persist without noise: variance={}", variance);
+    }
+
+    #[test]
+    fn test_fluid_step_benchmark_no_panic() {
+        let params = SolverParams::from_ra_pr(10000.0, 1.0);
+        let mut state = SimState::new_benchmark(100, N);
+        for _ in 0..10 {
+            fluid_step_benchmark(&mut state, &params);
+        }
+    }
+
+    #[test]
+    fn test_benchmark_develops_convection() {
+        let params = SolverParams::from_ra_pr(10000.0, 1.0);
+        let mut state = SimState::new_benchmark(10, N);
+        for _ in 0..200 {
+            fluid_step_benchmark(&mut state, &params);
+        }
+        // After 200 steps, should have non-trivial flow
+        let max_speed: f64 = state.vx.iter().zip(state.vy.iter())
+            .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
+            .fold(0.0_f64, f64::max);
+        assert!(max_speed > 1e-6, "Benchmark should develop flow, max_speed={}", max_speed);
+    }
+
+    #[test]
+    fn test_benchmark_boundary_preserved() {
+        let params = SolverParams::from_ra_pr(10000.0, 1.0);
+        let mut state = SimState::new_benchmark(10, N);
+        for _ in 0..50 {
+            fluid_step_benchmark(&mut state, &params);
+        }
+        // Bottom T should be 1.0 (Dirichlet)
+        for i in 0..N {
+            let t = state.temperature[idx(i as i32, 0, N)];
+            assert!((t - 1.0).abs() < 0.1, "Bottom T should be ~1.0, got {} at x={}", t, i);
+        }
+        // Top T should be 0.0
+        for i in 0..N {
+            let t = state.temperature[idx(i as i32, (N - 1) as i32, N)];
+            assert!(t < 0.1, "Top T should be ~0.0, got {} at x={}", t, i);
+        }
     }
 
     #[test]

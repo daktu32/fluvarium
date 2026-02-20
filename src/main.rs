@@ -221,6 +221,30 @@ fn parse_bgm_url() -> Option<String> {
         .map(|w| w[1].clone())
 }
 
+/// Parse `--ra <value>` from CLI args.
+fn parse_ra() -> Option<f64> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--ra")
+        .and_then(|w| w[1].parse().ok())
+}
+
+/// Parse `--pr <value>` from CLI args.
+fn parse_pr() -> Option<f64> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--pr")
+        .and_then(|w| w[1].parse().ok())
+}
+
+/// Parse `--export <path>` from CLI args.
+fn parse_export_path() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.windows(2)
+        .find(|w| w[0] == "--export")
+        .map(|w| w[1].clone())
+}
+
 /// Global PID for the bgm child process, so atexit/signal handlers can kill it.
 static BGM_PID: AtomicI32 = AtomicI32::new(0);
 
@@ -371,7 +395,23 @@ fn run_gui() {
 
     let mut tiles = 1; // Karman uses tiles=1
 
+    // --ra/--pr: override to benchmark RB mode
+    let benchmark_ra = parse_ra();
+    let benchmark_pr = parse_pr();
+    let export_path = parse_export_path();
+
     let mut model_params = ModelParams::new();
+    if let Some(ra) = benchmark_ra {
+        let pr = benchmark_pr.unwrap_or(1.0);
+        model = state::FluidModel::RayleighBenard;
+        model_params.rb = solver::SolverParams::from_ra_pr(ra, pr);
+        eprintln!("Benchmark mode: Ra={}, Pr={}", ra, pr);
+        eprintln!("  visc={:.6e}, diff={:.6e}, buoyancy={:.6e}",
+            model_params.rb.visc, model_params.rb.diff, model_params.rb.heat_buoyancy);
+        if let Some(ref path) = export_path {
+            eprintln!("  export → {}", path);
+        }
+    }
     let mut current_params = model_params.get(model).clone();
     let mut viz_mode = renderer::VizMode::Field;
     let mut show_arrows = false;
@@ -422,6 +462,7 @@ fn run_gui() {
 
     let (channels, physics_thread) = spawn_physics_thread(
         model, current_params.clone(), num_particles, sim_nx, steps_per_frame, running.clone(),
+        export_path,
     );
     let PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx } = channels;
 
@@ -802,6 +843,7 @@ fn run_headless() {
 
     let (channels, physics_thread) = spawn_physics_thread(
         model, current_params.clone(), num_particles, sim_nx, steps_per_frame, running.clone(),
+        None, // no export in headless mode (for now)
     );
     let PhysicsChannels { param_tx, reset_tx, snap_rx, snap_return_tx } = channels;
 
@@ -1145,6 +1187,7 @@ fn run_gui_playback(dir: &str) {
     use renderer::spherical::{
         Projection, SphericalRenderConfig, render_equirectangular, render_orthographic,
         render_particles_equirect, render_particles_ortho, render_field_badge,
+        render_gyre_track_equirect, render_gyre_track_ortho,
     };
     use renderer::lineplot::{LinePlotConfig, render_lineplot};
     use renderer::heatmap::{HeatmapConfig, render_heatmap, render_channel_particles};
@@ -1334,6 +1377,11 @@ fn run_gui_playback(dir: &str) {
             needs_redraw = true;
         }
 
+        if window.is_key_pressed(Key::G, KeyRepeat::No) && pb.has_gyre_track() {
+            pb.toggle_gyre_track();
+            needs_redraw = true;
+        }
+
         // Advance playback
         let prev_frame = pb.current_frame;
         pb.tick(dt);
@@ -1482,6 +1530,12 @@ fn run_gui_playback(dir: &str) {
                             }
                         }
 
+                        // Gyre track overlay
+                        if pb.show_gyre_track {
+                            let track = pb.gyre_track_up_to_current();
+                            render_gyre_track_equirect(&mut rgba_buf, track, &cfg, pb.current_frame);
+                        }
+
                         // Field badge
                         render_field_badge(
                             &mut rgba_buf, &cfg,
@@ -1529,6 +1583,12 @@ fn run_gui_playback(dir: &str) {
                             if ps.enabled {
                                 render_particles_ortho(&mut rgba_buf, ps, &cfg, cam_lat, cam_lon);
                             }
+                        }
+
+                        // Gyre track overlay
+                        if pb.show_gyre_track {
+                            let track = pb.gyre_track_up_to_current();
+                            render_gyre_track_ortho(&mut rgba_buf, track, &cfg, cam_lat, cam_lon, pb.current_frame);
                         }
 
                         // Field badge

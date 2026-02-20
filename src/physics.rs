@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 
+use crate::renderer;
 use crate::solver::{self, SolverParams};
 use crate::state::{FluidModel, FrameSnapshot, SimState, N};
 
@@ -37,6 +38,7 @@ pub fn create_sim_state(
         ),
         FluidModel::KelvinHelmholtz => SimState::new_kh(num_particles, params, nx),
         FluidModel::LidDrivenCavity => SimState::new_cavity(num_particles, nx),
+        FluidModel::RayleighBenard if params.benchmark_mode => SimState::new_benchmark(num_particles, nx),
         _ => SimState::new(num_particles, params.bottom_base, nx),
     }
 }
@@ -108,6 +110,7 @@ pub fn spawn_physics_thread(
     sim_nx: usize,
     steps_per_frame: usize,
     running: Arc<AtomicBool>,
+    export_path: Option<String>,
 ) -> (PhysicsChannels, std::thread::JoinHandle<()>) {
     let (param_tx, param_rx) = mpsc::channel::<SolverParams>();
     let (reset_tx, reset_rx) = mpsc::channel::<(FluidModel, SimState)>();
@@ -119,6 +122,17 @@ pub fn spawn_physics_thread(
         let mut sim = create_sim_state(cur_model, &params, num_particles, sim_nx);
         let mut params = params;
         let mut snap_buf = FrameSnapshot::new_empty(sim.nx, N, num_particles);
+        let mut step_count: u64 = 0;
+
+        // Setup NetCDF exporter for benchmark mode
+        let mut writer = if params.benchmark_mode {
+            export_path.as_ref().and_then(|path| {
+                create_benchmark_writer(path, sim.nx).ok()
+            })
+        } else {
+            None
+        };
+        let export_interval: u64 = 100; // export every 100 steps
 
         while running.load(Ordering::SeqCst) {
             while let Ok((new_model, new_sim)) = reset_rx.try_recv() {
@@ -134,7 +148,29 @@ pub fn spawn_physics_thread(
                     FluidModel::KarmanVortex => solver::fluid_step_karman(&mut sim, &params),
                     FluidModel::KelvinHelmholtz => solver::fluid_step_kh(&mut sim, &params),
                     FluidModel::LidDrivenCavity => solver::fluid_step_cavity(&mut sim, &params),
+                    FluidModel::RayleighBenard if params.benchmark_mode => {
+                        solver::fluid_step_benchmark(&mut sim, &params);
+                    }
                     _ => solver::fluid_step(&mut sim, &params),
+                }
+                step_count += 1;
+
+                // Benchmark export + diagnostics
+                if params.benchmark_mode && step_count % export_interval == 0 {
+                    let nu = solver::diagnostics::compute_nusselt(
+                        &sim.vy, &sim.temperature, params.diff, sim.nx,
+                    );
+                    let ke = solver::diagnostics::compute_kinetic_energy(
+                        &sim.vx, &sim.vy, sim.nx,
+                    );
+                    let time = step_count as f64 * params.dt;
+                    eprintln!("step={} t={:.4} Nu={:.4} KE={:.6e}", step_count, time, nu, ke);
+
+                    if let Some(ref mut w) = writer {
+                        let _ = write_benchmark_frame(
+                            w, &sim, &params, step_count, time,
+                        );
+                    }
                 }
             }
             sim.snapshot_into(&mut snap_buf);
@@ -148,6 +184,12 @@ pub fn spawn_physics_thread(
                 .filter(|b| b.temperature.len() == expected_len)
                 .unwrap_or_else(|| FrameSnapshot::new_empty(sim.nx, N, num_particles));
         }
+
+        // Finalize writer
+        if let Some(w) = writer {
+            let _ = w.finish();
+            eprintln!("Export complete.");
+        }
     });
 
     let channels = PhysicsChannels {
@@ -157,6 +199,80 @@ pub fn spawn_physics_thread(
         snap_return_tx,
     };
     (channels, handle)
+}
+
+/// Create a GtoolWriter for benchmark mode NetCDF export.
+fn create_benchmark_writer(
+    path: &str,
+    nx: usize,
+) -> Result<gtool_rs::writer::GtoolWriter, Box<dyn std::error::Error>> {
+    use gtool_rs::types::*;
+
+    let grid = GridSpec {
+        grid_type: GridType::Channel,
+        im: nx,
+        jm: N,
+        nm: 0,
+    };
+    let time = TimeInfo {
+        dt: 0.003,
+        output_interval: 100,
+    };
+    let mut writer = gtool_rs::writer::GtoolWriter::create(path, &grid, "fludarium_rb_benchmark", &time)?;
+
+    // Channel domain: x is periodic [0, nx), z is [0, 1] (normalized height)
+    writer.set_channel_domain(nx as f64, 1.0)?;
+
+    // Define fields
+    writer.define_field(&FieldMeta {
+        name: "theta".to_string(),
+        units: "1".to_string(),
+        long_name: "Perturbation temperature (T - T_cond)".to_string(),
+    })?;
+    writer.define_field(&FieldMeta {
+        name: "zeta".to_string(),
+        units: "1/s".to_string(),
+        long_name: "Vorticity (dvy/dx - dvx/dy)".to_string(),
+    })?;
+    writer.define_field(&FieldMeta {
+        name: "psi".to_string(),
+        units: "1".to_string(),
+        long_name: "Stream function".to_string(),
+    })?;
+
+    Ok(writer)
+}
+
+/// Write a single benchmark frame (theta, zeta, psi) to the NetCDF file.
+fn write_benchmark_frame(
+    writer: &mut gtool_rs::writer::GtoolWriter,
+    sim: &SimState,
+    _params: &SolverParams,
+    step: u64,
+    time: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let nx = sim.nx;
+
+    // Compute theta
+    let theta = solver::diagnostics::compute_theta(&sim.temperature, nx);
+
+    // Compute vorticity
+    let (zeta, _, _) = renderer::compute_vorticity(&sim.vx, &sim.vy, nx);
+
+    // Compute stream function
+    let (psi, _, _) = renderer::compute_stream_function(&sim.vx, nx);
+
+    let frame = gtool_rs::types::Frame {
+        step,
+        time,
+        fields: vec![
+            ("theta".to_string(), theta),
+            ("zeta".to_string(), zeta),
+            ("psi".to_string(), psi),
+        ],
+    };
+    writer.write_frame(&frame)?;
+    Ok(())
 }
 
 #[cfg(test)]

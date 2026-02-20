@@ -90,7 +90,7 @@ const PARAM_DEFS_KH: [ParamDef; 7] = [
     param!("shear","shear vel", "shear flow velocity magnitude",    shear_velocity,  0.01,   0.3,    0.005,  0.001,   0.08),
     param!("conf", "confine",   "vorticity confinement strength",   confinement,     0.0,    30.0,   0.5,    0.1,     0.0),
     param!("relax","relaxation","shear flow relaxation rate",       shear_relax,     0.0,    5.0,    0.1,    0.05,    1.0),
-    param!("thick","thickness", "shear layer half-width in cells",  shear_thickness, 1.0,    10.0,   0.5,    0.1,     3.0),
+    param!("thick","thickness", "shear layer half-width in cells",  shear_thickness, 2.0,    20.0,   1.0,    0.2,     6.0),
 ];
 
 /// Lid-Driven Cavity adjustable parameters.

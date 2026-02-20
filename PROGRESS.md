@@ -2,7 +2,7 @@
 
 ## Current Status: Quad-Model Fluid Simulator
 
-217 tests passing. Codebase modularized into directory-based modules: `solver/` (9 files), `renderer/` (4 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). Playback supports three grid types: spherical (equirectangular/orthographic), 1D periodic (line plot), and 2D channel (heatmap). No external config files — all defaults in code.
+238 tests passing. Codebase modularized into directory-based modules: `solver/` (10 files), `renderer/` (4 files), plus extracted `input.rs` and `physics.rs`. 2-thread pipeline (physics + render/display). Four simulation models (Rayleigh-Bénard convection + Kármán vortex street + Kelvin-Helmholtz instability + Lid-Driven Cavity) + RB benchmark mode (`--ra`/`--pr` CLI). N=80 grid with aspect-scaled NX for Kármán. Real-time parameter tuning via overlay panel in both GUI and headless modes. Headless terminal rendering via iTerm2 Graphics Protocol with full keyboard controls, adaptive render resolution, and dynamic terminal resize support. Per-model colormaps: TokyoNight (RB), SolarWind (Kármán), OceanLava (KH), ArcticIce (Cavity). Playback supports three grid types: spherical (equirectangular/orthographic), 1D periodic (line plot), and 2D channel (heatmap). No external config files — all defaults in code.
 
 ## Completed
 
@@ -300,12 +300,40 @@
 - **3グリッドタイプ対応**: 球面 (Gaussian) → 等距円筒/正射影、1D (Periodic) → 折れ線、2D (Channel) → ヒートマップ
 - 3 新テスト (heatmap config, buffer size, colored pixels)
 
+### RB ベンチマーク比較モード
+- **`--ra <Ra> --pr <Pr>`**: Rayleigh/Prandtl 数を指定してベンチマーク RB モードで起動
+  - `SolverParams::from_ra_pr(ra, pr)`: 無次元化パラメータ自動計算 (diff=1/√(Ra·Pr), visc=Pr·diff, buoyancy=Ra·visc·diff)
+  - `benchmark_mode: bool` フィールドで通常 RB とベンチマークを区別
+- **`BoundaryConfig::RayleighBenardBenchmark`**: 均一 Dirichlet BC (底面 T=1.0, 上面 T=0.0), no-slip 壁, X 周期
+- **`apply_buoyancy_perturbation()`**: 伝導プロファイル T_cond(y)=1-y/(N-1) からの偏差 θ=T-T_cond で浮力計算 → 射影での浮力消失を防止
+- **`solver::diagnostics` (新規)**: compute_nusselt() (Nu=1+<vy·θ>/diff), compute_kinetic_energy(), compute_theta()
+- **`fluid_step_benchmark()`**: inject_heat_source 省略 + 摂動浮力版の専用ステップ関数
+- **`SimState::new_benchmark()`**: 伝導プロファイル + 正弦波摂動で初期化
+- **`--export <path.nc>`**: GtoolWriter で theta/zeta/psi を Channel 形式で NetCDF 出力 (100ステップ間隔)
+- **stderr 診断**: Nu 数と運動エネルギー KE をリアルタイム出力
+- **`compute_vorticity`/`compute_stream_function`**: `pub(crate)` に昇格 (エクスポートで使用)
+- 21 新テスト: params (3), boundary (3), thermal (2), diagnostics (6), solver integration (3), state (4)
+
+### 渦中心軌跡トラッキング (Gyre Center Trajectory)
+- **gyre center 検出**: 符号付き渦度最大値 (max vort) + パラボリック補間でサブグリッド精度の (lon, lat) 取得
+- **NC プリコンピュート**: gtool-rs に `define_scalar`/`write_scalar`/`read_scalar` を追加、spmodel-rs の beta_gyre.rs で gyre_lon/gyre_lat をスカラータイムシリーズとして NC に埋め込み
+- **フォールバック**: NC にスカラーがなければ fludarium 側で vort フィールドから自前計算
+- **デフォルト表示制御**: NC に gyre_lon/gyre_lat がある場合のみデフォルト ON、vort のみの場合はデフォルト OFF (G キーでトグル可)
+- **スクリーンブレンド描画**: 時間グラデーション (シアン→ゴールド) + ソフトグロー (3px 幅) + 放射状マーカー。暗背景でも明背景でも映える screen blend 方式
+- **正射影 projection fix**: 順変換の経度回転符号を修正 (`R_y(-cam_lon)`)、粒子と gyre track の両方で視点回転時のずれを解消
+
+### 球面描画 FPS 最適化
+- **等距円筒図法**: `find_gauss_neighbors` を行単位にホイスト (ピクセル単位 → 行単位)、経度テーブル事前計算
+- **正射影**: mu ルックアップテーブル (1024 エントリ) で二分探索を排除、`mu = y1` で asin+sin ラウンドトリップ回避
+- **結果**: 正射影で ~10fps → ~50fps に改善
+
 ## Test Summary
-- **217 tests, all passing** (1 ignored: diagnostic)
+- **238 tests, all passing** (1 ignored: diagnostic)
 - 球面関連: graticule 4 tests, spherical interpolation/particle 7 tests, lineplot 3 tests
 - heatmap: config/buffer/render 3 tests
 - playback: gauss_nodes 4 tests
 - font: glyph/draw_text/status 5 tests
+- ベンチマーク: params 3, boundary 3, thermal 2, diagnostics 6, solver 3, state 4
 
 ## Next Steps
 - Tag v0.1.0 and push for GitHub Release

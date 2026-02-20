@@ -2,7 +2,7 @@
 
 use super::color;
 use super::font;
-use crate::spherical::{interpolate_gauss, SphericalParticleSystem, SphericalSnapshot};
+use crate::spherical::{SphericalParticleSystem, SphericalSnapshot};
 use std::f64::consts::PI;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,42 +62,59 @@ pub fn render_equirectangular(
     cfg: &SphericalRenderConfig,
     colormap: color::ColorMap,
 ) {
+    use crate::spherical::find_gauss_neighbors;
+
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let fw = cfg.frame_width;
     let fh = cfg.frame_height;
+    let im = snap.im;
+    let data = &snap.field_data;
 
     buf.resize(fw * fh * 4, 0);
     buf.fill(0);
 
-    // Use global range if available, otherwise per-frame range
     let (vmin, vmax) = snap
         .global_range
-        .unwrap_or_else(|| data_range(&snap.field_data));
+        .unwrap_or_else(|| data_range(data));
     let range = vmax - vmin;
     let inv_range = if range > 1e-30 { 1.0 / range } else { 1.0 };
 
+    // Pre-compute longitude fractional indices for each column
+    let lon_table: Vec<(usize, usize, f64)> = (0..dw)
+        .map(|sx| {
+            let lon_frac = (sx as f64 + 0.5) / dw as f64 * im as f64;
+            let i0 = lon_frac.floor() as usize % im;
+            let i1 = (i0 + 1) % im;
+            let wx = lon_frac - lon_frac.floor();
+            (i0, i1, wx)
+        })
+        .collect();
+
     for sy in 0..dh {
-        // lat from +π/2 (top) to -π/2 (bottom)
         let lat = PI / 2.0 - (sy as f64 + 0.5) / dh as f64 * PI;
         let mu = lat.sin();
 
-        for sx in 0..dw {
-            let lon = (sx as f64 + 0.5) / dw as f64 * 2.0 * PI;
+        // Hoist gauss neighbor lookup per row (same lat for all columns)
+        let (j0, j1, wy) = find_gauss_neighbors(gauss_nodes, mu);
+        let j0_base = j0 * im;
+        let j1_base = j1 * im;
+        let wy_inv = 1.0 - wy;
 
-            let val = interpolate_gauss(
-                &snap.field_data,
-                snap.im,
-                snap.jm,
-                gauss_nodes,
-                lon,
-                mu,
-            );
+        let row_off = sy * fw;
+        for sx in 0..dw {
+            let (i0, i1, wx) = lon_table[sx];
+            let wx_inv = 1.0 - wx;
+
+            let val = data[j0_base + i0] * wx_inv * wy_inv
+                + data[j0_base + i1] * wx * wy_inv
+                + data[j1_base + i0] * wx_inv * wy
+                + data[j1_base + i1] * wx * wy;
 
             let t = (val - vmin) * inv_range;
             let rgba = color::map_to_rgba(t, colormap);
 
-            let off = (sy * fw + sx) * 4;
+            let off = (row_off + sx) * 4;
             buf[off] = rgba[0];
             buf[off + 1] = rgba[1];
             buf[off + 2] = rgba[2];
@@ -119,39 +136,62 @@ pub fn render_orthographic(
     cam_lat: f64,
     cam_lon: f64,
 ) {
+    use crate::spherical::find_gauss_neighbors;
+
     let dw = cfg.display_width;
     let dh = cfg.display_height;
     let fw = cfg.frame_width;
     let fh = cfg.frame_height;
+    let im = snap.im;
+    let data = &snap.field_data;
 
     buf.resize(fw * fh * 4, 0);
     buf.fill(0);
 
     let (vmin, vmax) = snap
         .global_range
-        .unwrap_or_else(|| data_range(&snap.field_data));
+        .unwrap_or_else(|| data_range(data));
     let range = vmax - vmin;
     let inv_range = if range > 1e-30 { 1.0 / range } else { 1.0 };
 
     let radius = (dw.min(dh) as f64) * 0.45;
+    let inv_radius = 1.0 / radius;
     let cx = dw as f64 / 2.0;
     let cy = dh as f64 / 2.0;
 
-    // Camera rotation: rotate from view coords to sphere coords
     let sin_clat = cam_lat.sin();
     let cos_clat = cam_lat.cos();
     let sin_clon = cam_lon.sin();
     let cos_clon = cam_lon.cos();
 
-    // Background color (dark)
     let bg = [8u8, 10, 20, 255];
 
-    for sy in 0..dh {
-        for sx in 0..dw {
-            let off = (sy * fw + sx) * 4;
+    // Graticule threshold (constant for all pixels)
+    let pixel_deg = 180.0 / (radius * 2.0).max(1.0);
+    let threshold = pixel_deg * 0.8;
 
-            let nx = (sx as f64 - cx) / radius;
-            let ny = (cy - sy as f64) / radius; // y up
+    // Precompute mu→gauss neighbor lookup table to avoid binary search per pixel.
+    // 1024 entries covering mu ∈ [-1, 1].
+    const MU_TABLE_SIZE: usize = 1024;
+    let mu_table: Vec<(usize, usize)> = (0..MU_TABLE_SIZE)
+        .map(|k| {
+            let mu = -1.0 + 2.0 * (k as f64 + 0.5) / MU_TABLE_SIZE as f64;
+            let (j0, j1, _) = find_gauss_neighbors(gauss_nodes, mu);
+            (j0, j1)
+        })
+        .collect();
+
+    let im_inv_2pi = im as f64 / (2.0 * PI);
+
+    for sy in 0..dh {
+        let ny_base = (cy - sy as f64) * inv_radius;
+        let row_off = sy * fw;
+
+        for sx in 0..dw {
+            let off = (row_off + sx) * 4;
+
+            let nx = (sx as f64 - cx) * inv_radius;
+            let ny = ny_base;
             let r2 = nx * nx + ny * ny;
 
             if r2 > 1.0 {
@@ -165,30 +205,44 @@ pub fn render_orthographic(
             let nz = (1.0 - r2).sqrt();
 
             // Inverse camera rotation: view → world
-            // Camera looks at (cam_lon, cam_lat) along -z
-            // Rotation: Rz(-cam_lon) * Ry(-cam_lat) applied to (nx, ny, nz)
             let x1 = nx;
             let y1 = ny * cos_clat + nz * sin_clat;
             let z1 = -ny * sin_clat + nz * cos_clat;
 
             let world_x = x1 * cos_clon + z1 * sin_clon;
-            let _world_y = y1;
             let world_z = -x1 * sin_clon + z1 * cos_clon;
 
-            // World xyz → lon, lat
-            let lat = y1.asin();
-            let lon = world_x.atan2(world_z);
-            let lon = if lon < 0.0 { lon + 2.0 * PI } else { lon };
-            let mu = lat.sin();
+            // mu = sin(lat) = y1 (avoids asin+sin round-trip)
+            let mu = y1;
 
-            let val = interpolate_gauss(
-                &snap.field_data,
-                snap.im,
-                snap.jm,
-                gauss_nodes,
-                lon,
-                mu,
-            );
+            // lon via atan2
+            let lon = {
+                let l = world_x.atan2(world_z);
+                if l < 0.0 { l + 2.0 * PI } else { l }
+            };
+
+            // Inline interpolation using precomputed mu table
+            let mu_idx = ((mu + 1.0) * (MU_TABLE_SIZE as f64 * 0.5)) as usize;
+            let (j0, j1) = mu_table[mu_idx.min(MU_TABLE_SIZE - 1)];
+            let wy = if j0 == j1 {
+                0.0
+            } else {
+                ((mu - gauss_nodes[j0]) / (gauss_nodes[j1] - gauss_nodes[j0])).clamp(0.0, 1.0)
+            };
+            let wy_inv = 1.0 - wy;
+
+            let lon_frac = lon * im_inv_2pi;
+            let i0 = lon_frac as usize % im;
+            let i1 = (i0 + 1) % im;
+            let wx = lon_frac - lon_frac.floor();
+            let wx_inv = 1.0 - wx;
+
+            let j0_base = j0 * im;
+            let j1_base = j1 * im;
+            let val = data[j0_base + i0] * wx_inv * wy_inv
+                + data[j0_base + i1] * wx * wy_inv
+                + data[j1_base + i0] * wx_inv * wy
+                + data[j1_base + i1] * wx * wy;
 
             let t = (val - vmin) * inv_range;
             let rgba = color::map_to_rgba(t, colormap);
@@ -200,9 +254,8 @@ pub fn render_orthographic(
             let mut g = (rgba[1] as f64 * limb) as u8;
             let mut b = (rgba[2] as f64 * limb) as u8;
 
-            // Graticule overlay
-            let pixel_deg = 180.0 / (radius * 2.0).max(1.0);
-            let threshold = pixel_deg * 0.8;
+            // Graticule overlay (compute lat only when needed)
+            let lat = y1.asin();
             if let Some(is_eq) = graticule_hit(lon, lat, 30.0, 30.0, threshold) {
                 let gray = if is_eq { 220.0 } else { 160.0 };
                 let a = if is_eq { 0.5 } else { 0.35 };
@@ -618,9 +671,9 @@ pub fn render_particles_ortho(
         let y = sin_lat;
         let z = cos_lat * lon.cos();
 
-        // Camera rotation: world → view
-        let rx = x * cos_clon + z * sin_clon;
-        let rz = -x * sin_clon + z * cos_clon;
+        // Forward camera rotation: world → view
+        let rx = x * cos_clon - z * sin_clon;
+        let rz = x * sin_clon + z * cos_clon;
         let nx = rx;
         let ny = y * cos_clat - rz * sin_clat;
         let nz = y * sin_clat + rz * cos_clat;
@@ -678,6 +731,238 @@ pub fn render_particles_ortho(
                     }
                 }
             }
+        }
+    }
+}
+
+/// Outline + core offsets for a 3px-wide outlined track line.
+/// First pass: dark border (±1 pixel around center).
+/// Screen-blend a glow pixel: result = 1 - (1 - dst) * (1 - src * alpha).
+/// Always brightens; never darkens the background.
+fn glow_pixel(buf: &mut [u8], off: usize, color: [u8; 3], alpha: f64) {
+    let r = buf[off] as f64 / 255.0;
+    let g = buf[off + 1] as f64 / 255.0;
+    let b = buf[off + 2] as f64 / 255.0;
+    let sr = color[0] as f64 / 255.0 * alpha;
+    let sg = color[1] as f64 / 255.0 * alpha;
+    let sb = color[2] as f64 / 255.0 * alpha;
+    buf[off]     = ((1.0 - (1.0 - r) * (1.0 - sr)) * 255.0) as u8;
+    buf[off + 1] = ((1.0 - (1.0 - g) * (1.0 - sg)) * 255.0) as u8;
+    buf[off + 2] = ((1.0 - (1.0 - b) * (1.0 - sb)) * 255.0) as u8;
+}
+
+/// Draw a Bresenham line with screen-blended glow (3px wide: core + 1px soft fringe).
+fn draw_glow_bresenham(
+    buf: &mut [u8],
+    fw: usize,
+    dw: usize,
+    dh: usize,
+    sx0: isize, sy0: isize,
+    sx1: isize, sy1: isize,
+    color: [u8; 3],
+    intensity: f64,
+) {
+    let in_bounds = |x: isize, y: isize| -> bool {
+        x >= 0 && x < dw as isize && y >= 0 && y < dh as isize
+    };
+
+    let dx = (sx1 - sx0).abs();
+    let dy = -(sy1 - sy0).abs();
+    let step_x: isize = if sx0 < sx1 { 1 } else { -1 };
+    let step_y: isize = if sy0 < sy1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut cx = sx0;
+    let mut cy = sy0;
+    let max_steps = (dx.abs() + dy.abs() + 1) as usize;
+
+    let fringe_alpha = intensity * 0.35;
+    let core_alpha = intensity;
+
+    for _ in 0..max_steps {
+        // Soft fringe (±1 pixel)
+        for &(ox, oy) in &[(-1i8, 0i8), (1, 0), (0, -1), (0, 1)] {
+            let px = cx + ox as isize;
+            let py = cy + oy as isize;
+            if in_bounds(px, py) {
+                let off = (py as usize * fw + px as usize) * 4;
+                if off + 3 < buf.len() {
+                    glow_pixel(buf, off, color, fringe_alpha);
+                }
+            }
+        }
+        // Core pixel
+        if in_bounds(cx, cy) {
+            let off = (cy as usize * fw + cx as usize) * 4;
+            if off + 3 < buf.len() {
+                glow_pixel(buf, off, color, core_alpha);
+            }
+        }
+        if cx == sx1 && cy == sy1 { break; }
+        let e2 = 2 * err;
+        if e2 >= dy { err += dy; cx += step_x; }
+        if e2 <= dx { err += dx; cy += step_y; }
+    }
+}
+
+/// Draw a bright marker dot with radial glow at the current gyre position.
+fn draw_glow_marker(
+    buf: &mut [u8],
+    fw: usize,
+    dw: usize,
+    dh: usize,
+    sx: isize,
+    sy: isize,
+    color: [u8; 3],
+) {
+    let in_bounds = |x: isize, y: isize| -> bool {
+        x >= 0 && x < dw as isize && y >= 0 && y < dh as isize
+    };
+
+    // Radial glow (radius 5)
+    let r_max = 5isize;
+    let r_max_sq = (r_max * r_max) as f64;
+    for dy in -r_max..=r_max {
+        for ddx in -r_max..=r_max {
+            let dist_sq = (ddx * ddx + dy * dy) as f64;
+            if dist_sq <= r_max_sq {
+                let px = sx + ddx;
+                let py = sy + dy;
+                if in_bounds(px, py) {
+                    let off = (py as usize * fw + px as usize) * 4;
+                    if off + 3 < buf.len() {
+                        let alpha = (1.0 - dist_sq / r_max_sq).powi(2);
+                        glow_pixel(buf, off, color, alpha);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Gradient color for gyre track: cyan (tail) → gold (head).
+fn track_color(t: f64) -> [u8; 3] {
+    // t = 0.0 (oldest) → 1.0 (newest)
+    let r = (80.0 + 175.0 * t) as u8;
+    let g = (200.0 + 55.0 * t) as u8;
+    let b = (255.0 * (1.0 - t * 0.7)) as u8;
+    [r, g, b]
+}
+
+/// Render gyre center trajectory on equirectangular projection.
+/// `track` contains (lon, lat) pairs in radians, up to the current frame.
+pub fn render_gyre_track_equirect(
+    buf: &mut [u8],
+    track: &[(f64, f64)],
+    cfg: &SphericalRenderConfig,
+    current_frame: usize,
+) {
+    if track.len() < 2 {
+        return;
+    }
+
+    let dw = cfg.display_width;
+    let dh = cfg.display_height;
+    let fw = cfg.frame_width;
+    let n = track.len() - 1;
+    let inv_n = if n > 0 { 1.0 / n as f64 } else { 1.0 };
+
+    let to_screen = |lon: f64, lat: f64| -> (isize, isize) {
+        let sx = (lon / (2.0 * PI) * dw as f64) as isize;
+        let sy = ((PI / 2.0 - lat) / PI * dh as f64) as isize;
+        (sx, sy)
+    };
+
+    for i in 0..track.len() - 1 {
+        let (lon0, lat0) = track[i];
+        let (lon1, lat1) = track[i + 1];
+
+        // Skip segments that cross the date line (Δlon > π)
+        if (lon1 - lon0).abs() > PI {
+            continue;
+        }
+
+        let t = i as f64 * inv_n;
+        let color = track_color(t);
+        let intensity = 0.3 + 0.7 * t; // fade in from tail to head
+
+        let (sx0, sy0) = to_screen(lon0, lat0);
+        let (sx1, sy1) = to_screen(lon1, lat1);
+        draw_glow_bresenham(buf, fw, dw, dh, sx0, sy0, sx1, sy1, color, intensity);
+    }
+
+    // Current position marker (bright gold)
+    if let Some(&(lon, lat)) = track.get(current_frame) {
+        let (sx, sy) = to_screen(lon, lat);
+        draw_glow_marker(buf, fw, dw, dh, sx, sy, [255, 240, 100]);
+    }
+}
+
+/// Render gyre center trajectory on orthographic projection.
+pub fn render_gyre_track_ortho(
+    buf: &mut [u8],
+    track: &[(f64, f64)],
+    cfg: &SphericalRenderConfig,
+    cam_lat: f64,
+    cam_lon: f64,
+    current_frame: usize,
+) {
+    if track.len() < 2 {
+        return;
+    }
+
+    let dw = cfg.display_width;
+    let dh = cfg.display_height;
+    let fw = cfg.frame_width;
+    let radius = (dw.min(dh) as f64) * 0.45;
+    let cx = dw as f64 / 2.0;
+    let cy = dh as f64 / 2.0;
+    let n = track.len() - 1;
+    let inv_n = if n > 0 { 1.0 / n as f64 } else { 1.0 };
+
+    let sin_clat = cam_lat.sin();
+    let cos_clat = cam_lat.cos();
+    let sin_clon = cam_lon.sin();
+    let cos_clon = cam_lon.cos();
+
+    let project = |lon: f64, lat: f64| -> Option<(isize, isize)> {
+        let cos_lat = lat.cos();
+        let sin_lat = lat.sin();
+        let x = cos_lat * lon.sin();
+        let y = sin_lat;
+        let z = cos_lat * lon.cos();
+
+        // Forward camera rotation: R_lat^-1 * R_lon^-1 * world
+        let rx = x * cos_clon - z * sin_clon;
+        let rz = x * sin_clon + z * cos_clon;
+        let nx = rx;
+        let ny = y * cos_clat - rz * sin_clat;
+        let nz = y * sin_clat + rz * cos_clat;
+
+        if nz < 0.0 {
+            return None;
+        }
+
+        let screen_x = (cx + nx * radius) as isize;
+        let screen_y = (cy - ny * radius) as isize;
+        Some((screen_x, screen_y))
+    };
+
+    for i in 0..track.len() - 1 {
+        let p0 = project(track[i].0, track[i].1);
+        let p1 = project(track[i + 1].0, track[i + 1].1);
+
+        if let (Some((sx0, sy0)), Some((sx1, sy1))) = (p0, p1) {
+            let t = i as f64 * inv_n;
+            let color = track_color(t);
+            let intensity = 0.3 + 0.7 * t;
+            draw_glow_bresenham(buf, fw, dw, dh, sx0, sy0, sx1, sy1, color, intensity);
+        }
+    }
+
+    // Current position marker (bright gold)
+    if let Some(&(lon, lat)) = track.get(current_frame) {
+        if let Some((sx, sy)) = project(lon, lat) {
+            draw_glow_marker(buf, fw, dw, dh, sx, sy, [255, 240, 100]);
         }
     }
 }

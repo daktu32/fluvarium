@@ -13,6 +13,8 @@ pub enum FieldType {
 #[derive(Clone)]
 pub enum BoundaryConfig {
     RayleighBenard { bottom_base: f64 },
+    /// Benchmark RB: uniform Dirichlet T=1 (bottom), T=0 (top), no-slip walls, periodic X.
+    RayleighBenardBenchmark,
     KarmanVortex { inflow_vel: f64 },
     KelvinHelmholtz,
     LidDrivenCavity { lid_velocity: f64 },
@@ -21,7 +23,7 @@ pub enum BoundaryConfig {
 impl BoundaryConfig {
     /// Whether the X-axis uses periodic (wrapping) boundaries.
     pub fn periodic_x(&self) -> bool {
-        matches!(self, BoundaryConfig::RayleighBenard { .. } | BoundaryConfig::KelvinHelmholtz)
+        matches!(self, BoundaryConfig::RayleighBenard { .. } | BoundaryConfig::RayleighBenardBenchmark | BoundaryConfig::KelvinHelmholtz)
     }
 
     /// X iteration range for interior loops.
@@ -41,6 +43,9 @@ pub fn set_bnd(field_type: FieldType, x: &mut [f64], bc: &BoundaryConfig, nx: us
     match bc {
         BoundaryConfig::RayleighBenard { bottom_base } => {
             set_bnd_rb(field_type, x, *bottom_base, nx);
+        }
+        BoundaryConfig::RayleighBenardBenchmark => {
+            set_bnd_rb_benchmark(field_type, x, nx);
         }
         BoundaryConfig::KarmanVortex { inflow_vel } => {
             set_bnd_karman(field_type, x, *inflow_vel, nx);
@@ -74,6 +79,29 @@ fn set_bnd_rb(field_type: FieldType, x: &mut [f64], bottom_base: f64, nx: usize)
                 let hot = bottom_base + (1.0 - bottom_base) * (-dx * dx / (2.0 * sigma * sigma)).exp();
                 x[idx(i as i32, 0, nx)] = hot;
                 // Top: cold
+                x[idx(i as i32, (N - 1) as i32, nx)] = 0.0;
+            }
+            _ => {
+                x[idx(i as i32, 0, nx)] = x[idx(i as i32, 1, nx)];
+                x[idx(i as i32, (N - 1) as i32, nx)] = x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+        }
+    }
+}
+
+/// Rayleigh-Benard benchmark boundary conditions.
+/// Uniform Dirichlet: T=1.0 (bottom), T=0.0 (top).
+/// Velocity: no-slip at walls. X-axis periodic.
+fn set_bnd_rb_benchmark(field_type: FieldType, x: &mut [f64], nx: usize) {
+    for i in 0..nx {
+        match field_type {
+            FieldType::Vx | FieldType::Vy => {
+                x[idx(i as i32, 0, nx)] = -x[idx(i as i32, 1, nx)];
+                x[idx(i as i32, (N - 1) as i32, nx)] = -x[idx(i as i32, (N - 2) as i32, nx)];
+            }
+            FieldType::Temperature => {
+                // Uniform Dirichlet: bottom T=1, top T=0
+                x[idx(i as i32, 0, nx)] = 1.0;
                 x[idx(i as i32, (N - 1) as i32, nx)] = 0.0;
             }
             _ => {
@@ -431,6 +459,49 @@ mod tests {
         assert_eq!(field[idx(0, 10, N)], 11.0, "Left scalar should copy neighbor");
         // Right: copy x=N-2
         assert_eq!(field[idx((N - 1) as i32, 10, N)], 13.0, "Right scalar should copy neighbor");
+    }
+
+    fn bench_bc() -> BoundaryConfig {
+        BoundaryConfig::RayleighBenardBenchmark
+    }
+
+    #[test]
+    fn test_benchmark_uniform_dirichlet_temperature() {
+        let bc = bench_bc();
+        let mut temp = vec![0.5; N * N];
+        set_bnd(FieldType::Temperature, &mut temp, &bc, N);
+        // Bottom: uniform T=1.0
+        for i in 0..N {
+            assert!((temp[idx(i as i32, 0, N)] - 1.0).abs() < 1e-10,
+                "Bottom should be T=1.0 at x={}", i);
+        }
+        // Top: uniform T=0.0
+        for i in 0..N {
+            assert!(temp[idx(i as i32, (N - 1) as i32, N)].abs() < 1e-10,
+                "Top should be T=0.0 at x={}", i);
+        }
+    }
+
+    #[test]
+    fn test_benchmark_noslip_velocity() {
+        let bc = bench_bc();
+        let mut vx = vec![0.0; N * N];
+        for i in 0..N {
+            vx[idx(i as i32, 1, N)] = 5.0;
+            vx[idx(i as i32, (N - 2) as i32, N)] = 3.0;
+        }
+        set_bnd(FieldType::Vx, &mut vx, &bc, N);
+        for i in 0..N {
+            assert_eq!(vx[idx(i as i32, 0, N)], -5.0, "vx bottom no-slip at x={}", i);
+            assert_eq!(vx[idx(i as i32, (N - 1) as i32, N)], -3.0, "vx top no-slip at x={}", i);
+        }
+    }
+
+    #[test]
+    fn test_benchmark_periodic_x() {
+        let bc = bench_bc();
+        assert!(bc.periodic_x(), "Benchmark RB should have periodic X");
+        assert_eq!(bc.x_range(N), (0, N), "Benchmark x_range should be full width");
     }
 
     #[test]

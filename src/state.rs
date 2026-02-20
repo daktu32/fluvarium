@@ -12,7 +12,7 @@ impl Default for FluidModel {
     }
 }
 
-pub const N: usize = 80;
+pub const N: usize = 160;
 pub const TRAIL_LEN: usize = 8;
 
 pub struct Xor128 {
@@ -412,6 +412,76 @@ impl SimState {
         }
     }
 
+    /// Create initial state for RB benchmark mode.
+    /// Temperature: conduction profile T_cond(y) = 1 - y/(N-1) + sinusoidal perturbation.
+    /// Velocity: small random perturbation.
+    pub fn new_benchmark(num_particles: usize, nx: usize) -> Self {
+        let size = nx * N;
+        let mut rng = Xor128::new(42);
+
+        let mut temperature = vec![0.0; size];
+        let mut vx = vec![0.0; size];
+        let mut vy = vec![0.0; size];
+
+        let n_minus_1 = (N - 1) as f64;
+        let nx_f = nx as f64;
+
+        // Initial temperature: conduction profile + sinusoidal perturbation
+        for j in 0..N {
+            let t_cond = 1.0 - j as f64 / n_minus_1;
+            for i in 0..nx {
+                let ii = idx(i as i32, j as i32, nx);
+                // Sinusoidal perturbation concentrated at midplane
+                let y_env = (std::f64::consts::PI * j as f64 / n_minus_1).sin();
+                let perturbation = 0.05 * y_env
+                    * (2.0 * std::f64::consts::PI * i as f64 / nx_f).sin();
+                temperature[ii] = (t_cond + perturbation).clamp(0.0, 1.0);
+            }
+        }
+
+        // Small random velocity perturbation to break symmetry
+        let perturbation = 1e-5;
+        for j in 0..N {
+            for i in 0..nx {
+                let ii = idx(i as i32, j as i32, nx);
+                vx[ii] = perturbation * rng.next_f64();
+                vy[ii] = perturbation * rng.next_f64();
+            }
+        }
+
+        // Particles in interior
+        let mut particles_x = Vec::with_capacity(num_particles);
+        let mut particles_y = Vec::with_capacity(num_particles);
+        for _ in 0..num_particles {
+            let px = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (nx as f64 - 5.0);
+            let py = 2.0 + (rng.next_f64() + 1.0) * 0.5 * (N as f64 - 5.0);
+            particles_x.push(px);
+            particles_y.push(py);
+        }
+
+        Self {
+            nx,
+            vx,
+            vy,
+            vx0: vec![0.0; size],
+            vy0: vec![0.0; size],
+            temperature,
+            scratch_a: vec![0.0; size],
+            scratch_b: vec![0.0; size],
+            vorticity: vec![0.0; size],
+            vorticity_abs: vec![0.0; size],
+            rng,
+            particles_x,
+            particles_y,
+            mask: None,
+            cylinder: None,
+            trail_xs: vec![Vec::new(); TRAIL_LEN],
+            trail_ys: vec![Vec::new(); TRAIL_LEN],
+            trail_cursor: 0,
+            trail_count: 0,
+        }
+    }
+
     pub fn new_cavity(num_particles: usize, nx: usize) -> Self {
         let size = nx * N;
         let mut rng = Xor128::new(42);
@@ -476,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_grid_size() {
-        assert_eq!(N, 80);
+        assert_eq!(N, 160);
     }
 
     #[test]
@@ -826,6 +896,49 @@ mod tests {
         let state = SimState::new_kh(10, &params, N);
         let has_nonzero_vy = state.vy.iter().any(|&v| v.abs() > 1e-15);
         assert!(has_nonzero_vy, "vy should have non-zero perturbation for KH instability");
+    }
+
+    #[test]
+    fn test_new_benchmark_conduction_profile() {
+        let state = SimState::new_benchmark(10, N);
+        // Mid-height should be near T_cond = 0.5
+        let mid = N / 2;
+        let avg_mid: f64 = (0..N).map(|x| state.temperature[idx(x as i32, mid as i32, N)]).sum::<f64>() / N as f64;
+        assert!((avg_mid - 0.5).abs() < 0.05, "Mid should be ~0.5, got {}", avg_mid);
+        // Bottom should be near T=1.0
+        let avg_bot: f64 = (0..N).map(|x| state.temperature[idx(x as i32, 0, N)]).sum::<f64>() / N as f64;
+        assert!((avg_bot - 1.0).abs() < 0.05, "Bottom should be ~1.0, got {}", avg_bot);
+        // Top should be near T=0.0
+        let avg_top: f64 = (0..N).map(|x| state.temperature[idx(x as i32, (N - 1) as i32, N)]).sum::<f64>() / N as f64;
+        assert!(avg_top.abs() < 0.05, "Top should be ~0.0, got {}", avg_top);
+    }
+
+    #[test]
+    fn test_new_benchmark_has_perturbation() {
+        let state = SimState::new_benchmark(10, N);
+        // Temperature at midplane should have horizontal variation (sinusoidal perturbation)
+        let mid = N / 2;
+        let temps: Vec<f64> = (0..N).map(|x| state.temperature[idx(x as i32, mid as i32, N)]).collect();
+        let avg = temps.iter().sum::<f64>() / N as f64;
+        let variance = temps.iter().map(|t| (t - avg).powi(2)).sum::<f64>() / N as f64;
+        assert!(variance > 1e-8, "Should have horizontal perturbation, variance={}", variance);
+    }
+
+    #[test]
+    fn test_new_benchmark_no_mask() {
+        let state = SimState::new_benchmark(10, N);
+        assert!(state.mask.is_none());
+        assert!(state.cylinder.is_none());
+    }
+
+    #[test]
+    fn test_new_benchmark_fields_size() {
+        let state = SimState::new_benchmark(50, N);
+        let size = N * N;
+        assert_eq!(state.vx.len(), size);
+        assert_eq!(state.vy.len(), size);
+        assert_eq!(state.temperature.len(), size);
+        assert_eq!(state.particles_x.len(), 50);
     }
 
     #[test]
